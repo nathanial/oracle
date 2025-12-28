@@ -5,6 +5,7 @@
 
 import Lean.Data.Json
 import Wisp
+import Chronicle
 import Oracle.Core.Config
 import Oracle.Core.Error
 import Oracle.Core.Types
@@ -23,13 +24,15 @@ structure ChatStream where
   sseStream : Wisp.HTTP.SSE.Stream
   /-- Whether the stream has ended -/
   finished : IO.Ref Bool
+  /-- Optional logger for debugging -/
+  logger : Option Chronicle.Logger := none
 
 namespace ChatStream
 
 /-- Create a chat stream from an SSE stream -/
-def fromSSE (sse : Wisp.HTTP.SSE.Stream) : IO ChatStream := do
+def fromSSE (sse : Wisp.HTTP.SSE.Stream) (logger : Option Chronicle.Logger := none) : IO ChatStream := do
   let finished ← IO.mkRef false
-  return { sseStream := sse, finished := finished }
+  return { sseStream := sse, finished := finished, logger := logger }
 
 /-- Receive the next chunk from the stream -/
 partial def recv (s : ChatStream) : IO (Option StreamChunk) := do
@@ -39,23 +42,41 @@ partial def recv (s : ChatStream) : IO (Option StreamChunk) := do
   let event? ← s.sseStream.recv
   match event? with
   | none =>
+    if let some l := s.logger then
+      l.trace "SSE stream ended (no more events)"
     s.finished.set true
     return none
   | some event =>
+    -- Log raw SSE event at trace level
+    if let some l := s.logger then
+      let preview := if event.data.length > 100 then event.data.take 100 ++ "..." else event.data
+      l.trace s!"SSE event: type={event.event} data={preview}"
+
     -- Check for [DONE] signal
     if event.data.trim == "[DONE]" then
+      if let some l := s.logger then
+        l.trace "SSE [DONE] signal received"
       s.finished.set true
       return none
     -- Skip keep-alive comments (empty data)
     else if event.data.trim.isEmpty then
+      if let some l := s.logger then
+        l.trace "SSE empty event (keep-alive), skipping"
       s.recv  -- Recurse to get next event
     else
       -- Parse the chunk
       match Json.parse event.data with
-      | .error _ => s.recv  -- Skip unparseable chunks
+      | .error e =>
+        if let some l := s.logger then
+          l.warn s!"SSE JSON parse error: {e}"
+          l.warn s!"SSE raw data: {event.data.take 200}"
+        s.recv  -- Skip unparseable chunks
       | .ok json =>
         match fromJson? json with
-        | .error _ => s.recv  -- Skip malformed chunks
+        | .error e =>
+          if let some l := s.logger then
+            l.warn s!"SSE chunk decode error: {e}"
+          s.recv  -- Skip malformed chunks
         | .ok chunk => return some chunk
 
 /-- Iterate over all chunks in the stream -/
@@ -131,7 +152,16 @@ def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) :
       logger.trace s!"  [{i}] {role}: {preview}"
       i := i + 1
 
-  let httpReq := buildRequest c { req with stream := true }
+  let streamReq := { req with stream := true }
+  let jsonBody := streamReq.toJsonString
+
+  -- Log the actual JSON body at trace level
+  if let some logger := c.config.logger then
+    logger.trace s!"Request JSON ({jsonBody.length} chars): {jsonBody.take 500}"
+    if jsonBody.length > 500 then
+      logger.trace s!"Request JSON (continued): {jsonBody.drop 500 |>.take 500}"
+
+  let httpReq := buildRequest c streamReq
   let task ← c.httpClient.executeStreaming httpReq
   let result := task.get
 
@@ -151,7 +181,7 @@ def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) :
       if let some logger := c.config.logger then
         logger.info s!"API response: status=200, streaming started"
       let sseStream ← Wisp.HTTP.SSE.Stream.fromStreaming streamResp
-      let chatStream ← ChatStream.fromSSE sseStream
+      let chatStream ← ChatStream.fromSSE sseStream c.config.logger
       return .ok chatStream
     else if streamResp.status == 401 then
       if let some logger := c.config.logger then
@@ -167,6 +197,7 @@ def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) :
       let bodyStr := String.fromUTF8! body
       if let some logger := c.config.logger then
         logger.error s!"API error: status={streamResp.status}"
+        logger.error s!"API error response body: {bodyStr}"
       return .error (parseApiError bodyStr)
 
 /-- Stream a completion and collect the full content -/
