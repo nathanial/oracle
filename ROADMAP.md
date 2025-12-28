@@ -4,103 +4,36 @@ This document outlines improvements, new features, and code cleanup opportunitie
 
 ## Current State Summary
 
-The Oracle library provides a functional OpenRouter API client with:
+The Oracle library provides a full-featured OpenRouter API client with:
 - Synchronous and streaming chat completions
 - Tool/function calling support
-- Basic error handling with retry detection
-- JSON serialization for requests/responses
+- Automatic retry with exponential backoff and jitter
+- Complete JSON serialization with roundtrip support
+- Model discovery and metadata querying
+- Generation statistics for cost tracking
+- Extended sampling parameters (top_k, min_p, logprobs, etc.)
 - Integration with the wisp HTTP client library
 
 **Files:**
 - `Oracle/Core/Types.lean` - Message, Role, ToolCall, FunctionCall types
-- `Oracle/Core/Config.lean` - Client configuration
+- `Oracle/Core/Config.lean` - Client configuration with endpoint helpers
 - `Oracle/Core/Error.lean` - Error types and OracleResult
 - `Oracle/Core/Tool.lean` - Tool/function definitions
-- `Oracle/Request/ChatRequest.lean` - Chat request builder with JSON serialization
+- `Oracle/Json.lean` - JSON utilities (withOptionalFields helper)
+- `Oracle/Retry.lean` - Retry configuration and exponential backoff
+- `Oracle/Request/ChatRequest.lean` - Chat request builder with all parameters
 - `Oracle/Response/ChatResponse.lean` - Response parsing
 - `Oracle/Response/Delta.lean` - Streaming delta types
 - `Oracle/Response/Usage.lean` - Token usage tracking
-- `Oracle/Client/Sync.lean` - Synchronous client
+- `Oracle/Response/GenerationStats.lean` - Generation statistics for cost tracking
+- `Oracle/Response/Model.lean` - Model metadata and filtering
+- `Oracle/Client/Sync.lean` - Synchronous client with retry support
 - `Oracle/Client/Stream.lean` - Streaming client
-- `Tests/Main.lean` - Test suite
+- `Tests/Main.lean` - Test suite (52 tests)
 
 ---
 
 ## Feature Proposals
-
-### [Priority: High] Generation Statistics Endpoint
-
-**Description:** Add support for querying generation statistics via the `/api/v1/generation` endpoint to retrieve detailed token counts and cost information after a request completes.
-
-**Rationale:** OpenRouter provides precise token accounting using the model's native tokenizer. This is essential for cost tracking and analytics.
-
-**Affected Files:**
-- `Oracle/Core/Config.lean` - Add `generationEndpoint` helper
-- New file: `Oracle/Generation.lean` - Types for generation stats
-- `Oracle/Client/Sync.lean` - Add `getGeneration` method
-
-**Estimated Effort:** Small
-
-**Dependencies:** None
-
----
-
-### [Priority: High] Models List Endpoint
-
-**Description:** Add support for the `GET /api/v1/models` endpoint to retrieve the list of available models with their properties (context length, pricing, capabilities).
-
-**Rationale:** Allows applications to dynamically discover available models, check capabilities before making requests, and display model information to users.
-
-**Affected Files:**
-- New file: `Oracle/Model.lean` - Model metadata types
-- `Oracle/Client/Sync.lean` - Add `listModels` method
-- `Oracle/Core/Config.lean` - Add `modelsEndpoint` helper
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None
-
----
-
-### [Priority: High] Automatic Retry with Backoff
-
-**Description:** Implement automatic retry logic for retryable errors (rate limits, network errors, 5xx errors) with exponential backoff.
-
-**Rationale:** The library already has `isRetryable` detection but no automatic retry mechanism. This is essential for production reliability.
-
-**Affected Files:**
-- New file: `Oracle/Retry.lean` - Retry configuration and logic
-- `Oracle/Client/Sync.lean` - Wrap requests with retry logic
-- `Oracle/Client/Stream.lean` - Wrap streaming requests with retry logic
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None
-
----
-
-### [Priority: Medium] Missing Request Parameters
-
-**Description:** Add support for OpenRouter parameters not currently implemented:
-- `top_k` - Narrows token selection
-- `repetition_penalty` - Reduces token repetition
-- `min_p` - Minimum probability threshold
-- `top_a` - Filters by probability
-- `logit_bias` - Token ID bias mapping
-- `logprobs` / `top_logprobs` - Log probability output
-- `parallel_tool_calls` - Enable simultaneous tool calls
-- `verbosity` - Controls response length (low/medium/high)
-
-**Rationale:** These are documented OpenRouter parameters that some models support. Complete API coverage improves library utility.
-
-**Affected Files:**
-- `Oracle/Request/ChatRequest.lean` - Add fields and JSON serialization
-
-**Estimated Effort:** Small
-
-**Dependencies:** None
-
----
 
 ### [Priority: Medium] Provider Routing Options
 
@@ -201,42 +134,6 @@ The Oracle library provides a functional OpenRouter API client with:
 ---
 
 ## Code Improvements
-
-### [Priority: High] Add FromJson Instance for Message
-
-**Current State:** `Message` has `ToJson` but no `FromJson` instance, making it impossible to properly deserialize messages from responses.
-
-**Proposed Change:** Implement complete `FromJson Message` for proper roundtrip serialization.
-
-**Benefits:** Enables conversation replay, caching, and proper response handling.
-
-**Affected Files:**
-- `Oracle/Request/ChatRequest.lean` (lines 141-160)
-
-**Estimated Effort:** Small
-
----
-
-### [Priority: High] Refactor JSON Serialization Builder Pattern
-
-**Current State:** `ChatRequest.ToJson` uses a verbose pattern of chaining `let` bindings for optional fields (lines 223-271).
-
-**Proposed Change:** Create a helper for building JSON objects with optional fields:
-```lean
-def jsonOptional (fields : List (String × Option Json)) : Json :=
-  Json.mkObj (fields.filterMap fun (k, v?) => v?.map (k, ·))
-```
-
-**Benefits:** Reduces code duplication, improves readability, easier to maintain.
-
-**Affected Files:**
-- `Oracle/Request/ChatRequest.lean`
-- `Oracle/Core/Types.lean`
-- `Oracle/Core/Tool.lean`
-
-**Estimated Effort:** Small
-
----
 
 ### [Priority: Medium] Extract HTTP Error Handling
 
@@ -448,4 +345,16 @@ Consider deeper integration with:
 
 ## Version History
 
+- **v0.3.0** - Models endpoint, automatic retry, extended parameters
+  - Added `GET /api/v1/models` endpoint with `listModels`, `getModel` methods
+  - Added `Oracle/Retry.lean` with exponential backoff and jitter
+  - Added retry-enabled methods: `chatWithRetry`, `promptWithRetry`, etc.
+  - Added new request parameters: `top_k`, `repetition_penalty`, `min_p`, `top_a`, `logit_bias`, `logprobs`, `top_logprobs`, `parallel_tool_calls`
+  - Added `Model`, `ModelPricing`, `ModelsResponse` types with filtering helpers
+- **v0.2.0** - JSON improvements, generation statistics
+  - Added `FromJson Message` for proper roundtrip serialization
+  - Added `Json.withOptionalFields` helper to reduce boilerplate
+  - Refactored `Message.ToJson`, `ToolFunction.ToJson`, `ChatRequest.ToJson` to use helper
+  - Added `GET /api/v1/generation` endpoint with `getGeneration` method
+  - Added `GenerationStats` type for token accounting
 - **v0.1.0** - Initial implementation with sync/streaming chat completions, tool calling

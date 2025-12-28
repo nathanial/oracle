@@ -33,6 +33,9 @@ import Oracle.Core.Tool
 -- JSON utilities
 import Oracle.Json
 
+-- Retry logic
+import Oracle.Retry
+
 -- Request types
 import Oracle.Request.ChatRequest
 
@@ -41,6 +44,7 @@ import Oracle.Response.Usage
 import Oracle.Response.ChatResponse
 import Oracle.Response.Delta
 import Oracle.Response.GenerationStats
+import Oracle.Response.Model
 
 -- Client
 import Oracle.Client.Sync

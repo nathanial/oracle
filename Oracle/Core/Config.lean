@@ -62,6 +62,10 @@ def chatEndpoint (c : Config) : String :=
 def generationEndpoint (c : Config) (generationId : String) : String :=
   s!"{c.baseUrl}/generation?id={generationId}"
 
+/-- Get the models list endpoint URL -/
+def modelsEndpoint (c : Config) : String :=
+  s!"{c.baseUrl}/models"
+
 end Config
 
 end Oracle

@@ -388,6 +388,183 @@ test "withOptionalFields handles empty list" := do
 end Tests.JsonUtilsTests
 
 -- ============================================================================
+-- Model tests
+-- ============================================================================
+
+namespace Tests.ModelTests
+
+testSuite "Model Parsing"
+
+test "Model fromJson parses basic fields" := do
+  let json := Lean.Json.mkObj [
+    ("id", Lean.Json.str "anthropic/claude-sonnet-4"),
+    ("name", Lean.Json.str "Claude Sonnet 4"),
+    ("context_length", Lean.Json.num 200000),
+    ("pricing", Lean.Json.mkObj [
+      ("prompt", Lean.Json.num 0.003),
+      ("completion", Lean.Json.num 0.015)
+    ])
+  ]
+  match Lean.fromJson? json with
+  | .ok (model : Model) =>
+    shouldBe model.id "anthropic/claude-sonnet-4"
+    shouldBe model.name "Claude Sonnet 4"
+    shouldBe model.contextLength 200000
+  | .error e => throw (IO.userError s!"Parse failed: {e}")
+
+test "Model fromJson handles string pricing" := do
+  let json := Lean.Json.mkObj [
+    ("id", Lean.Json.str "test/model"),
+    ("context_length", Lean.Json.num 4096),
+    ("pricing", Lean.Json.mkObj [
+      ("prompt", Lean.Json.str "0.001"),
+      ("completion", Lean.Json.str "0.002")
+    ])
+  ]
+  match Lean.fromJson? json with
+  | .ok (model : Model) =>
+    shouldBe model.id "test/model"
+  | .error e => throw (IO.userError s!"Parse failed: {e}")
+
+test "ModelsResponse findById" := do
+  let model1 : Model := {
+    id := "model-a", name := "Model A", contextLength := 4096,
+    pricing := { prompt := 0.001, completion := 0.002 }
+  }
+  let model2 : Model := {
+    id := "model-b", name := "Model B", contextLength := 8192,
+    pricing := { prompt := 0.002, completion := 0.004 }
+  }
+  let response : ModelsResponse := { data := #[model1, model2] }
+  match response.findById "model-b" with
+  | some m => shouldBe m.name "Model B"
+  | none => throw (IO.userError "Model not found")
+
+test "ModelsResponse withTools filters correctly" := do
+  let model1 : Model := {
+    id := "with-tools", name := "With Tools", contextLength := 4096,
+    pricing := { prompt := 0.001, completion := 0.002 },
+    supportsTools := true
+  }
+  let model2 : Model := {
+    id := "no-tools", name := "No Tools", contextLength := 4096,
+    pricing := { prompt := 0.001, completion := 0.002 },
+    supportsTools := false
+  }
+  let response : ModelsResponse := { data := #[model1, model2] }
+  let toolModels := response.withTools
+  shouldBe toolModels.size 1
+  shouldBe toolModels[0]!.id "with-tools"
+
+#generate_tests
+
+end Tests.ModelTests
+
+-- ============================================================================
+-- Retry tests
+-- ============================================================================
+
+namespace Tests.RetryTests
+
+testSuite "Retry Logic"
+
+test "RetryConfig.default has reasonable values" := do
+  let cfg := RetryConfig.default
+  shouldBe cfg.maxRetries 3
+  shouldBe cfg.initialDelayMs 1000
+  shouldBe cfg.useJitter true
+
+test "RetryConfig.none has zero retries" := do
+  let cfg := RetryConfig.none
+  shouldBe cfg.maxRetries 0
+
+test "RetryConfig.delayForAttempt with exponential backoff" := do
+  let cfg : RetryConfig := { initialDelayMs := 1000, backoffMultiplier := 2.0 }
+  shouldBe (cfg.delayForAttempt 0) 1000
+  shouldBe (cfg.delayForAttempt 1) 2000
+  shouldBe (cfg.delayForAttempt 2) 4000
+
+test "RetryConfig.delayForAttempt respects maxDelayMs" := do
+  let cfg : RetryConfig := { initialDelayMs := 1000, maxDelayMs := 3000, backoffMultiplier := 2.0 }
+  shouldBe (cfg.delayForAttempt 0) 1000
+  shouldBe (cfg.delayForAttempt 1) 2000
+  shouldBe (cfg.delayForAttempt 2) 3000  -- Capped at max
+  shouldBe (cfg.delayForAttempt 3) 3000  -- Still capped
+
+#generate_tests
+
+end Tests.RetryTests
+
+-- ============================================================================
+-- New request parameter tests
+-- ============================================================================
+
+namespace Tests.NewParamsTests
+
+testSuite "New Request Parameters"
+
+test "ChatRequest.withTopK sets top_k" := do
+  let req := ChatRequest.simple "gpt-4" "Hi" |>.withTopK 40
+  shouldBe req.topK (some 40)
+
+test "ChatRequest.withRepetitionPenalty sets penalty" := do
+  let req := ChatRequest.simple "gpt-4" "Hi" |>.withRepetitionPenalty 1.2
+  shouldBe req.repetitionPenalty (some 1.2)
+
+test "ChatRequest.withMinP sets min_p" := do
+  let req := ChatRequest.simple "gpt-4" "Hi" |>.withMinP 0.1
+  shouldBe req.minP (some 0.1)
+
+test "ChatRequest.withLogprobs enables logprobs" := do
+  let req := ChatRequest.simple "gpt-4" "Hi" |>.withLogprobs 5
+  shouldBe req.logprobs (some true)
+  shouldBe req.topLogprobs (some 5)
+
+test "ChatRequest.withParallelToolCalls enables parallel" := do
+  let req := ChatRequest.simple "gpt-4" "Hi" |>.withParallelToolCalls
+  shouldBe req.parallelToolCalls (some true)
+
+test "ChatRequest toJson includes new parameters" := do
+  let req := ChatRequest.simple "gpt-4" "Hi"
+    |>.withTopK 40
+    |>.withRepetitionPenalty 1.1
+  let json := Lean.toJson req
+  match json.getObjValAs? Nat "top_k" with
+  | .ok k => shouldBe k 40
+  | .error _ => throw (IO.userError "Missing top_k")
+
+test "ChatRequest toJson includes logit_bias as object" := do
+  let req := ChatRequest.simple "gpt-4" "Hi"
+    |>.withLogitBias [(100, 1.0), (200, -1.0)]
+  let json := Lean.toJson req
+  match json.getObjVal? "logit_bias" with
+  | .ok biasJson =>
+    match biasJson.getObjValAs? Float "100" with
+    | .ok v => shouldBe v 1.0
+    | .error _ => throw (IO.userError "Missing token 100 in logit_bias")
+  | .error _ => throw (IO.userError "Missing logit_bias")
+
+#generate_tests
+
+end Tests.NewParamsTests
+
+-- ============================================================================
+-- Config endpoint tests
+-- ============================================================================
+
+namespace Tests.EndpointTests
+
+testSuite "Config Endpoints"
+
+test "Config.modelsEndpoint returns correct URL" := do
+  let cfg := Config.simple "key"
+  shouldBe cfg.modelsEndpoint "https://openrouter.ai/api/v1/models"
+
+#generate_tests
+
+end Tests.EndpointTests
+
+-- ============================================================================
 -- Main entry point
 -- ============================================================================
 

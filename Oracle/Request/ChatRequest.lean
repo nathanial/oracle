@@ -47,6 +47,22 @@ structure ChatRequest where
   responseFormat : Option ResponseFormat := none
   /-- Random seed for reproducibility -/
   seed : Option Nat := none
+  /-- Top-K sampling: only consider the top K tokens -/
+  topK : Option Nat := none
+  /-- Repetition penalty (1.0 = no penalty, >1.0 = discourage repetition) -/
+  repetitionPenalty : Option Float := none
+  /-- Minimum probability threshold for token selection -/
+  minP : Option Float := none
+  /-- Top-A sampling: filters tokens by probability -/
+  topA : Option Float := none
+  /-- Token ID bias mapping (token_id -> bias value) -/
+  logitBias : Option (List (Nat × Float)) := none
+  /-- Whether to return log probabilities -/
+  logprobs : Option Bool := none
+  /-- Number of top log probabilities to return (0-20) -/
+  topLogprobs : Option Nat := none
+  /-- Whether to allow parallel tool calls -/
+  parallelToolCalls : Option Bool := none
   deriving Inhabited
 
 namespace ChatRequest
@@ -86,6 +102,50 @@ def withSystem (r : ChatRequest) (system : String) : ChatRequest :=
 /-- Add a message to the conversation -/
 def addMessage (r : ChatRequest) (msg : Message) : ChatRequest :=
   { r with messages := r.messages.push msg }
+
+/-- Set top-K sampling -/
+def withTopK (r : ChatRequest) (k : Nat) : ChatRequest :=
+  { r with topK := some k }
+
+/-- Set repetition penalty -/
+def withRepetitionPenalty (r : ChatRequest) (penalty : Float) : ChatRequest :=
+  { r with repetitionPenalty := some penalty }
+
+/-- Set minimum probability threshold -/
+def withMinP (r : ChatRequest) (p : Float) : ChatRequest :=
+  { r with minP := some p }
+
+/-- Set top-A sampling -/
+def withTopA (r : ChatRequest) (a : Float) : ChatRequest :=
+  { r with topA := some a }
+
+/-- Set logit bias for specific tokens -/
+def withLogitBias (r : ChatRequest) (bias : List (Nat × Float)) : ChatRequest :=
+  { r with logitBias := some bias }
+
+/-- Enable log probability output -/
+def withLogprobs (r : ChatRequest) (topN : Nat := 0) : ChatRequest :=
+  { r with logprobs := some true, topLogprobs := if topN > 0 then some topN else none }
+
+/-- Enable parallel tool calls -/
+def withParallelToolCalls (r : ChatRequest) : ChatRequest :=
+  { r with parallelToolCalls := some true }
+
+/-- Set top-P (nucleus sampling) -/
+def withTopP (r : ChatRequest) (p : Float) : ChatRequest :=
+  { r with topP := some p }
+
+/-- Set presence penalty -/
+def withPresencePenalty (r : ChatRequest) (penalty : Float) : ChatRequest :=
+  { r with presencePenalty := some penalty }
+
+/-- Set frequency penalty -/
+def withFrequencyPenalty (r : ChatRequest) (penalty : Float) : ChatRequest :=
+  { r with frequencyPenalty := some penalty }
+
+/-- Set seed for reproducibility -/
+def withSeed (r : ChatRequest) (seed : Nat) : ChatRequest :=
+  { r with seed := some seed }
 
 end ChatRequest
 
@@ -221,6 +281,10 @@ end ResponseFormat
 
 namespace ChatRequest
 
+/-- Convert logit bias list to JSON object -/
+private def logitBiasToJson (bias : List (Nat × Float)) : Json :=
+  Json.mkObj (bias.map fun (tokenId, value) => (toString tokenId, toJson value))
+
 instance : ToJson ChatRequest where
   toJson req := Json.withOptionalFields [
     ("model", some (Json.str req.model)),
@@ -235,7 +299,15 @@ instance : ToJson ChatRequest where
     ("presence_penalty", req.presencePenalty.map toJson),
     ("frequency_penalty", req.frequencyPenalty.map toJson),
     ("response_format", req.responseFormat.map toJson),
-    ("seed", req.seed.map toJson)
+    ("seed", req.seed.map toJson),
+    ("top_k", req.topK.map toJson),
+    ("repetition_penalty", req.repetitionPenalty.map toJson),
+    ("min_p", req.minP.map toJson),
+    ("top_a", req.topA.map toJson),
+    ("logit_bias", req.logitBias.map logitBiasToJson),
+    ("logprobs", req.logprobs.map Json.bool),
+    ("top_logprobs", req.topLogprobs.map toJson),
+    ("parallel_tool_calls", req.parallelToolCalls.map Json.bool)
   ]
 
 /-- Convert request to JSON string -/

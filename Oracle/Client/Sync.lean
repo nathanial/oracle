@@ -9,10 +9,12 @@ import Oracle.Core.Config
 import Oracle.Core.Error
 import Oracle.Core.Types
 import Oracle.Core.Tool
+import Oracle.Retry
 import Oracle.Request.ChatRequest
 import Oracle.Response.ChatResponse
 import Oracle.Response.Usage
 import Oracle.Response.GenerationStats
+import Oracle.Response.Model
 
 namespace Oracle
 
@@ -189,6 +191,73 @@ def getGeneration (c : Client) (generationId : String) : IO (OracleResult Genera
       return .error (.rateLimitError retryAfter)
     else
       return .error (parseApiError bodyStr)
+
+/-- List all available models -/
+def listModels (c : Client) : IO (OracleResult ModelsResponse) := do
+  let httpReq := Wisp.Request.get c.config.modelsEndpoint
+    |>.withBearerToken c.config.apiKey
+    |>.withTimeout c.config.timeout
+
+  let task ← c.httpClient.execute httpReq
+  let result := task.get
+
+  match result with
+  | .error e =>
+    match e with
+    | .timeoutError msg => return .error (.timeoutError msg)
+    | .connectionError msg => return .error (.networkError msg)
+    | .sslError msg => return .error (.networkError s!"SSL error: {msg}")
+    | _ => return .error (.networkError s!"{e}")
+  | .ok response =>
+    let bodyStr := String.fromUTF8! response.body
+
+    if response.status == 200 then
+      match Json.parse bodyStr with
+      | .ok json =>
+        match fromJson? json with
+        | .ok models => return .ok models
+        | .error e => return .error (.parseError s!"Failed to parse models: {e}")
+      | .error e => return .error (.parseError s!"Invalid JSON: {e}")
+    else if response.status == 401 then
+      return .error (.authError "Invalid API key")
+    else if response.status == 429 then
+      let retryAfter := response.header "Retry-After" >>= String.toNat?
+      return .error (.rateLimitError retryAfter)
+    else
+      return .error (parseApiError bodyStr)
+
+/-- Get a specific model by ID -/
+def getModel (c : Client) (modelId : String) : IO (OracleResult Model) := do
+  match ← c.listModels with
+  | .ok models =>
+    match models.findById modelId with
+    | some model => return .ok model
+    | none => return .error (.apiError "not_found" s!"Model not found: {modelId}")
+  | .error e => return .error e
+
+-- ============================================================================
+-- Retry-enabled methods
+-- ============================================================================
+
+/-- Chat with automatic retry on transient errors -/
+def chatWithRetry (c : Client) (req : ChatRequest) (cfg : RetryConfig := {}) : IO (RetryResult ChatResponse) :=
+  Retry.withRetry cfg (c.chat req)
+
+/-- Complete with automatic retry on transient errors -/
+def completeWithRetry (c : Client) (messages : Array Message) (opts : ChatOptions := {}) (cfg : RetryConfig := {}) : IO (RetryResult String) :=
+  Retry.withRetry cfg (c.complete messages opts)
+
+/-- Prompt with automatic retry on transient errors -/
+def promptWithRetry (c : Client) (userPrompt : String) (systemPrompt : Option String := none) (cfg : RetryConfig := {}) : IO (RetryResult String) :=
+  Retry.withRetry cfg (c.prompt userPrompt systemPrompt)
+
+/-- Get generation stats with automatic retry -/
+def getGenerationWithRetry (c : Client) (generationId : String) (cfg : RetryConfig := {}) : IO (RetryResult GenerationStats) :=
+  Retry.withRetry cfg (c.getGeneration generationId)
+
+/-- List models with automatic retry -/
+def listModelsWithRetry (c : Client) (cfg : RetryConfig := {}) : IO (RetryResult ModelsResponse) :=
+  Retry.withRetry cfg c.listModels
 
 end Client
 
