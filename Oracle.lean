@@ -30,6 +30,9 @@ import Oracle.Core.Config
 import Oracle.Core.Error
 import Oracle.Core.Tool
 
+-- JSON utilities
+import Oracle.Json
+
 -- Request types
 import Oracle.Request.ChatRequest
 
@@ -37,6 +40,7 @@ import Oracle.Request.ChatRequest
 import Oracle.Response.Usage
 import Oracle.Response.ChatResponse
 import Oracle.Response.Delta
+import Oracle.Response.GenerationStats
 
 -- Client
 import Oracle.Client.Sync

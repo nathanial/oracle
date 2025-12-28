@@ -101,6 +101,71 @@ test "ToolChoice toJson - function" := do
   | .ok t => shouldBe t "function"
   | .error _ => throw (IO.userError "Expected object with type")
 
+test "Message toJson/fromJson roundtrip" := do
+  let msg := Message.user "Hello, world!"
+  let json := Lean.toJson msg
+  match Lean.fromJson? json with
+  | .ok (parsed : Message) =>
+    shouldBe parsed.role msg.role
+    shouldBe parsed.content msg.content
+  | .error e => throw (IO.userError s!"Failed to parse message: {e}")
+
+test "Message fromJson handles null content" := do
+  let json := Lean.Json.mkObj [
+    ("role", Lean.Json.str "assistant"),
+    ("tool_calls", Lean.Json.arr #[
+      Lean.Json.mkObj [
+        ("id", Lean.Json.str "call_1"),
+        ("type", Lean.Json.str "function"),
+        ("function", Lean.Json.mkObj [
+          ("name", Lean.Json.str "get_weather"),
+          ("arguments", Lean.Json.str "{}")
+        ])
+      ]
+    ])
+  ]
+  match Lean.fromJson? json with
+  | .ok (msg : Message) =>
+    shouldBe msg.role Role.assistant
+    shouldBe msg.content ""  -- Should default to empty string
+    shouldSatisfy msg.toolCalls.isSome "should have tool calls"
+  | .error e => throw (IO.userError s!"Failed to parse: {e}")
+
+test "Message fromJson with tool_call_id" := do
+  let json := Lean.Json.mkObj [
+    ("role", Lean.Json.str "tool"),
+    ("content", Lean.Json.str "Result"),
+    ("tool_call_id", Lean.Json.str "call_abc")
+  ]
+  match Lean.fromJson? json with
+  | .ok (msg : Message) =>
+    shouldBe msg.role Role.tool
+    shouldBe msg.toolCallId (some "call_abc")
+  | .error e => throw (IO.userError s!"Failed to parse: {e}")
+
+test "FunctionCall toJson/fromJson roundtrip" := do
+  let fc : FunctionCall := { name := "test", arguments := "{\"x\":1}" }
+  let json := Lean.toJson fc
+  match Lean.fromJson? json with
+  | .ok (parsed : FunctionCall) =>
+    shouldBe parsed.name fc.name
+    shouldBe parsed.arguments fc.arguments
+  | .error e => throw (IO.userError s!"Failed to parse: {e}")
+
+test "ToolCall toJson/fromJson roundtrip" := do
+  let tc : ToolCall := {
+    id := "call_123"
+    type := "function"
+    function := { name := "calc", arguments := "{}" }
+  }
+  let json := Lean.toJson tc
+  match Lean.fromJson? json with
+  | .ok (parsed : ToolCall) =>
+    shouldBe parsed.id tc.id
+    shouldBe parsed.type tc.type
+    shouldBe parsed.function.name tc.function.name
+  | .error e => throw (IO.userError s!"Failed to parse: {e}")
+
 #generate_tests
 
 end Tests.JsonTests
@@ -173,6 +238,14 @@ test "Config with custom base URL" := do
   let cfg : Config := { apiKey := "key", baseUrl := "https://custom.api/v1" }
   shouldBe cfg.chatEndpoint "https://custom.api/v1/chat/completions"
 
+test "Config.generationEndpoint returns correct URL" := do
+  let cfg := Config.simple "key"
+  shouldBe (cfg.generationEndpoint "gen_123") "https://openrouter.ai/api/v1/generation?id=gen_123"
+
+test "Config.generationEndpoint with custom base URL" := do
+  let cfg : Config := { apiKey := "key", baseUrl := "https://custom.api/v1" }
+  shouldBe (cfg.generationEndpoint "abc") "https://custom.api/v1/generation?id=abc"
+
 #generate_tests
 
 end Tests.ConfigTests
@@ -227,9 +300,92 @@ test "Usage fromJson parses token counts" := do
     shouldBe usage.totalTokens 30
   | .error e => throw (IO.userError s!"Parse failed: {e}")
 
+test "GenerationStats fromJson parses all fields" := do
+  let json := Lean.Json.mkObj [
+    ("id", Lean.Json.str "gen_abc123"),
+    ("total_cost", Lean.Json.num 0.0015),
+    ("created_at", Lean.Json.str "2024-01-15T10:30:00Z"),
+    ("model", Lean.Json.str "anthropic/claude-sonnet-4"),
+    ("tokens_prompt", Lean.Json.num 100),
+    ("tokens_completion", Lean.Json.num 50)
+  ]
+  match Lean.fromJson? json with
+  | .ok (stats : GenerationStats) =>
+    shouldBe stats.id "gen_abc123"
+    shouldBe stats.model "anthropic/claude-sonnet-4"
+    shouldBe stats.promptTokens 100
+    shouldBe stats.completionTokens 50
+    shouldBe stats.totalTokens 150
+  | .error e => throw (IO.userError s!"Parse failed: {e}")
+
+test "GenerationStats fromJson handles optional fields" := do
+  let json := Lean.Json.mkObj [
+    ("id", Lean.Json.str "gen_xyz"),
+    ("total_cost", Lean.Json.num 0.001),
+    ("created_at", Lean.Json.str "2024-01-15T10:30:00Z"),
+    ("model", Lean.Json.str "gpt-4"),
+    ("tokens_prompt", Lean.Json.num 50),
+    ("tokens_completion", Lean.Json.num 25),
+    ("native_tokens_prompt", Lean.Json.num 48),
+    ("native_tokens_completion", Lean.Json.num 23),
+    ("app_id", Lean.Json.num 12345)
+  ]
+  match Lean.fromJson? json with
+  | .ok (stats : GenerationStats) =>
+    shouldBe stats.nativeTokensPrompt (some 48)
+    shouldBe stats.nativeTokensCompletion (some 23)
+    shouldBe stats.appId (some 12345)
+  | .error e => throw (IO.userError s!"Parse failed: {e}")
+
 #generate_tests
 
 end Tests.ResponseTests
+
+-- ============================================================================
+-- JSON Utilities tests
+-- ============================================================================
+
+namespace Tests.JsonUtilsTests
+
+testSuite "JSON Utilities"
+
+test "withOptionalFields filters none values" := do
+  let json := Oracle.Json.withOptionalFields [
+    ("required", some (Lean.Json.str "value")),
+    ("optional", none),
+    ("another", some (Lean.Json.num 42))
+  ]
+  -- Should have 2 fields, not 3
+  match json.getObj? with
+  | .ok obj =>
+    shouldBe obj.size 2
+    match json.getObjValAs? String "required" with
+    | .ok v => shouldBe v "value"
+    | .error _ => throw (IO.userError "Missing required field")
+    match json.getObjValAs? Nat "another" with
+    | .ok v => shouldBe v 42
+    | .error _ => throw (IO.userError "Missing another field")
+  | .error _ => throw (IO.userError "Expected object")
+
+test "withOptionalFields preserves all some values" := do
+  let json := Oracle.Json.withOptionalFields [
+    ("a", some (Lean.Json.str "1")),
+    ("b", some (Lean.Json.str "2")),
+    ("c", some (Lean.Json.str "3"))
+  ]
+  match json.getObj? with
+  | .ok obj => shouldBe obj.size 3
+  | .error _ => throw (IO.userError "Expected object")
+
+test "withOptionalFields handles empty list" := do
+  let json := Oracle.Json.withOptionalFields []
+  match json.getObj? with
+  | .ok obj => shouldBe obj.size 0
+  | .error _ => throw (IO.userError "Expected object")
+
+#generate_tests
+
+end Tests.JsonUtilsTests
 
 -- ============================================================================
 -- Main entry point

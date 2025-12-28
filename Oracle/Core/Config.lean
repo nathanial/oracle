@@ -58,6 +58,10 @@ def setLogger (c : Config) (logger : Chronicle.Logger) : Config :=
 def chatEndpoint (c : Config) : String :=
   s!"{c.baseUrl}/chat/completions"
 
+/-- Get the generation statistics endpoint URL -/
+def generationEndpoint (c : Config) (generationId : String) : String :=
+  s!"{c.baseUrl}/generation?id={generationId}"
+
 end Config
 
 end Oracle

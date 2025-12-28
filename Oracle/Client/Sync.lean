@@ -12,6 +12,7 @@ import Oracle.Core.Tool
 import Oracle.Request.ChatRequest
 import Oracle.Response.ChatResponse
 import Oracle.Response.Usage
+import Oracle.Response.GenerationStats
 
 namespace Oracle
 
@@ -152,6 +153,42 @@ def chatWithTools (c : Client) (messages : Array Message) (tools : Array Tool)
     toolChoice := opts.toolChoice.orElse (fun _ => some .auto)
   }
   c.chat req
+
+/-- Get generation statistics for a completed request -/
+def getGeneration (c : Client) (generationId : String) : IO (OracleResult GenerationStats) := do
+  let httpReq := Wisp.Request.get (c.config.generationEndpoint generationId)
+    |>.withBearerToken c.config.apiKey
+    |>.withTimeout c.config.timeout
+
+  let task ← c.httpClient.execute httpReq
+  let result := task.get
+
+  match result with
+  | .error e =>
+    match e with
+    | .timeoutError msg => return .error (.timeoutError msg)
+    | .connectionError msg => return .error (.networkError msg)
+    | .sslError msg => return .error (.networkError s!"SSL error: {msg}")
+    | _ => return .error (.networkError s!"{e}")
+  | .ok response =>
+    let bodyStr := String.fromUTF8! response.body
+
+    if response.status == 200 then
+      match Json.parse bodyStr with
+      | .ok json =>
+        -- The API wraps the response in a "data" field
+        let dataJson := json.getObjVal? "data" |>.toOption |>.getD json
+        match fromJson? dataJson with
+        | .ok stats => return .ok stats
+        | .error e => return .error (.parseError s!"Failed to parse generation stats: {e}")
+      | .error e => return .error (.parseError s!"Invalid JSON: {e}")
+    else if response.status == 401 then
+      return .error (.authError "Invalid API key")
+    else if response.status == 429 then
+      let retryAfter := response.header "Retry-After" >>= String.toNat?
+      return .error (.rateLimitError retryAfter)
+    else
+      return .error (parseApiError bodyStr)
 
 end Client
 
