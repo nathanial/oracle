@@ -3,6 +3,8 @@
   Client configuration for OpenRouter API
 -/
 
+import Chronicle
+
 namespace Oracle
 
 /-- OpenRouter API configuration -/
@@ -19,7 +21,8 @@ structure Config where
   siteName : Option String := none
   /-- Request timeout in milliseconds -/
   timeout : UInt64 := 60000
-  deriving Repr, Inhabited
+  /-- Optional logger for request/response logging -/
+  logger : Option Chronicle.Logger := none
 
 namespace Config
 
@@ -46,6 +49,10 @@ def setSiteName (c : Config) (name : String) : Config :=
 /-- Set the request timeout -/
 def setTimeout (c : Config) (ms : UInt64) : Config :=
   { c with timeout := ms }
+
+/-- Set the logger for request/response logging -/
+def setLogger (c : Config) (logger : Chronicle.Logger) : Config :=
+  { c with logger := some logger }
 
 /-- Get the chat completions endpoint URL -/
 def chatEndpoint (c : Config) : String :=

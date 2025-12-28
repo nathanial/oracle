@@ -8,6 +8,7 @@ package oracle where
 -- Local workspace dependencies
 require wisp from ".." / "wisp"
 require crucible from ".." / "crucible"
+require chronicle from ".." / "chronicle"
 
 -- Curl link args (inherited from wisp, but needed for our executables)
 def curlLinkArgs : Array String :=

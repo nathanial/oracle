@@ -32,7 +32,6 @@ structure ChatOptions where
 structure Client where
   config : Config
   httpClient : HTTP.Client
-  deriving Inhabited
 
 namespace Client
 

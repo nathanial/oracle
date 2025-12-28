@@ -86,16 +86,28 @@ partial def collect (s : ChatStream) : IO (Array StreamChunk) := do
     chunksRef.set (current.push chunk)
   chunksRef.get
 
-/-- Print content to stdout as it arrives (for interactive use) -/
-partial def printContent (s : ChatStream) : IO String := do
+/-- Print content to stdout as it arrives (for interactive use).
+    Returns (content, chunkCount) for debugging. -/
+partial def printContentWithCount (s : ChatStream) : IO (String × Nat) := do
   let contentRef ← IO.mkRef ""
+  let countRef ← IO.mkRef 0
+  let stdout ← IO.getStdout
   s.forEach fun chunk => do
+    countRef.modify (· + 1)
     if let some content := chunk.content then
       IO.print content
+      stdout.flush  -- Ensure content is displayed immediately
       let current ← contentRef.get
       contentRef.set (current ++ content)
   IO.println ""  -- Final newline
-  contentRef.get
+  let content ← contentRef.get
+  let count ← countRef.get
+  pure (content, count)
+
+/-- Print content to stdout as it arrives (for interactive use) -/
+partial def printContent (s : ChatStream) : IO String := do
+  let (content, _) ← s.printContentWithCount
+  pure content
 
 end ChatStream
 
@@ -103,12 +115,31 @@ namespace Client
 
 /-- Execute a streaming chat completion request -/
 def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) := do
+  -- Log request with message details
+  if let some logger := c.config.logger then
+    logger.debug s!"API request: {c.config.model} ({req.messages.size} messages)"
+    -- Log each message at trace level for debugging
+    let mut i := 0
+    for msg in req.messages do
+      let role := msg.role.toString
+      let preview := if msg.content.length > 100 then
+        msg.content.take 100 ++ "..."
+      else
+        msg.content
+      -- Replace newlines with spaces for single-line log entry
+      let preview := preview.replace "\n" " "
+      logger.trace s!"  [{i}] {role}: {preview}"
+      i := i + 1
+
   let httpReq := buildRequest c { req with stream := true }
   let task ← c.httpClient.executeStreaming httpReq
   let result := task.get
 
   match result with
   | .error e =>
+    -- Log network errors
+    if let some logger := c.config.logger then
+      logger.error s!"API network error: {e}"
     match e with
     | .timeoutError msg => return .error (.timeoutError msg)
     | .connectionError msg => return .error (.networkError msg)
@@ -116,17 +147,26 @@ def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) :
     | _ => return .error (.networkError s!"{e}")
   | .ok streamResp =>
     if streamResp.status == 200 then
+      -- Log success
+      if let some logger := c.config.logger then
+        logger.info s!"API response: status=200, streaming started"
       let sseStream ← Wisp.HTTP.SSE.Stream.fromStreaming streamResp
       let chatStream ← ChatStream.fromSSE sseStream
       return .ok chatStream
     else if streamResp.status == 401 then
+      if let some logger := c.config.logger then
+        logger.error "API error: Invalid API key (401)"
       return .error (.authError "Invalid API key")
     else if streamResp.status == 429 then
+      if let some logger := c.config.logger then
+        logger.warn "API rate limited (429)"
       return .error (.rateLimitError none)
     else
       -- For error responses, we need to read the body
       let body ← streamResp.readAllBody
       let bodyStr := String.fromUTF8! body
+      if let some logger := c.config.logger then
+        logger.error s!"API error: status={streamResp.status}"
       return .error (parseApiError bodyStr)
 
 /-- Stream a completion and collect the full content -/
