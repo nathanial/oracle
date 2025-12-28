@@ -165,6 +165,62 @@ instance : FromJson Role where
 
 end Role
 
+namespace ContentPart
+
+instance : ToJson ContentPart where
+  toJson
+    | .text content => Json.mkObj [("type", Json.str "text"), ("text", Json.str content)]
+    | .image source detail => Json.mkObj [
+        ("type", Json.str "image_url"),
+        ("image_url", Json.mkObj [("url", Json.str source.toDataUrl), ("detail", Json.str detail)])
+      ]
+
+instance : FromJson ContentPart where
+  fromJson? json := do
+    let partType ← json.getObjValAs? String "type"
+    match partType with
+    | "text" =>
+      let text ← json.getObjValAs? String "text"
+      return .text text
+    | "image_url" =>
+      let imgObj ← json.getObjVal? "image_url"
+      let urlStr ← imgObj.getObjValAs? String "url"
+      let detail := imgObj.getObjValAs? String "detail" |>.toOption |>.getD "auto"
+      -- Parse data URL or regular URL
+      let source := if urlStr.startsWith "data:" then
+        -- Parse "data:image/png;base64,..."
+        match urlStr.splitOn ";base64," with
+        | [header, data] =>
+          let mediaType := header.drop 5  -- Remove "data:"
+          ImageSource.base64 mediaType data
+        | _ => ImageSource.url urlStr
+      else
+        ImageSource.url urlStr
+      return .image source detail
+    | _ => throw s!"Unknown content part type: {partType}"
+
+end ContentPart
+
+namespace MessageContent
+
+instance : ToJson MessageContent where
+  toJson
+    | .string s => Json.str s
+    | .parts ps => toJson ps
+
+instance : FromJson MessageContent where
+  fromJson? json :=
+    match json.getStr? with
+    | .ok s => return .string s
+    | .error _ =>
+      match json.getArr? with
+      | .ok jsonArr => do
+        let parts ← jsonArr.mapM fromJson?
+        return .parts parts
+      | .error _ => throw "Content must be string or array of content parts"
+
+end MessageContent
+
 namespace FunctionCall
 
 instance : ToJson FunctionCall where
@@ -204,7 +260,7 @@ namespace Message
 instance : ToJson Message where
   toJson msg := Json.withOptionalFields [
     ("role", some (toJson msg.role)),
-    ("content", some (Json.str msg.content)),
+    ("content", some (toJson msg.content)),
     ("name", msg.name.map Json.str),
     ("tool_call_id", msg.toolCallId.map Json.str),
     ("tool_calls", msg.toolCalls.map toJson)
@@ -214,14 +270,19 @@ instance : FromJson Message where
   fromJson? json := do
     let roleStr ← json.getObjValAs? String "role"
     let role := Role.fromString? roleStr |>.getD .assistant
-    -- Content can be null for tool calls, default to empty string
-    let content := json.getObjValAs? String "content" |>.toOption |>.getD ""
+    -- Content can be null for tool calls, string, or array of content parts
+    let content : MessageContent ← match json.getObjVal? "content" with
+      | .ok contentJson =>
+        match (fromJson? contentJson : Except String MessageContent) with
+        | .ok mc => pure mc
+        | .error _ => pure (MessageContent.string "")
+      | .error _ => pure (MessageContent.string "")
     let name := json.getObjValAs? String "name" |>.toOption
     let toolCallId := json.getObjValAs? String "tool_call_id" |>.toOption
     let toolCalls : Option (Array ToolCall) := do
       let tcJson ← json.getObjVal? "tool_calls" |>.toOption
-      let arr ← tcJson.getArr?.toOption
-      arr.mapM fromJson? |>.toOption
+      let jsonArr ← tcJson.getArr?.toOption
+      jsonArr.mapM fromJson? |>.toOption
     return { role, content, name, toolCallId, toolCalls }
 
 end Message

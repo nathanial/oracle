@@ -5,6 +5,7 @@
 
 import Lean.Data.Json
 import Oracle.Core.Types
+import Oracle.Request.ChatRequest
 import Oracle.Response.Usage
 
 namespace Oracle
@@ -38,10 +39,13 @@ instance : FromJson Choice where
     let roleStr ← messageJson.getObjValAs? String "role"
     let role := Role.fromString? roleStr |>.getD .assistant
 
-    -- Content can be null for tool calls
-    let content := match messageJson.getObjValAs? String "content" with
-      | .ok c => c
-      | .error _ => ""
+    -- Content can be null for tool calls, string, or array of content parts
+    let content : MessageContent ← match messageJson.getObjVal? "content" with
+      | .ok contentJson =>
+        match (fromJson? contentJson : Except String MessageContent) with
+        | .ok mc => pure mc
+        | .error _ => pure (MessageContent.string "")
+      | .error _ => pure (MessageContent.string "")
 
     -- Parse tool calls if present
     let toolCalls : Option (Array ToolCall) := do
@@ -90,7 +94,8 @@ instance : FromJson ChatResponse where
 def content (r : ChatResponse) : Option String :=
   if h : 0 < r.choices.size then
     let msg := r.choices[0].message
-    if msg.content.isEmpty then none else some msg.content
+    let text := msg.content.asString
+    if text.isEmpty then none else some text
   else
     none
 

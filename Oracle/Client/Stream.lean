@@ -143,10 +143,9 @@ def chatStream (c : Client) (req : ChatRequest) : IO (OracleResult ChatStream) :
     let mut i := 0
     for msg in req.messages do
       let role := msg.role.toString
-      let preview := if msg.content.length > 100 then
-        msg.content.take 100 ++ "..."
-      else
-        msg.content
+      let preview := match msg.content with
+        | .string s => if s.length > 100 then s.take 100 ++ "..." else s
+        | .parts ps => s!"[{ps.size} content parts]"
       -- Replace newlines with spaces for single-line log entry
       let preview := preview.replace "\n" " "
       logger.trace s!"  [{i}] {role}: {preview}"

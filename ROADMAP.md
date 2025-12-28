@@ -7,6 +7,7 @@ This document outlines improvements, new features, and code cleanup opportunitie
 The Oracle library provides a full-featured OpenRouter API client with:
 - Synchronous and streaming chat completions
 - Tool/function calling support
+- Multimodal/vision support for images (URL and base64)
 - Automatic retry with exponential backoff and jitter
 - Complete JSON serialization with roundtrip support
 - Model discovery and metadata querying
@@ -15,7 +16,7 @@ The Oracle library provides a full-featured OpenRouter API client with:
 - Integration with the wisp HTTP client library
 
 **Files:**
-- `Oracle/Core/Types.lean` - Message, Role, ToolCall, FunctionCall types
+- `Oracle/Core/Types.lean` - Message, Role, ToolCall, FunctionCall, ImageSource, ContentPart, MessageContent types
 - `Oracle/Core/Config.lean` - Client configuration with endpoint helpers
 - `Oracle/Core/Error.lean` - Error types and OracleResult
 - `Oracle/Core/Tool.lean` - Tool/function definitions
@@ -85,19 +86,25 @@ The Oracle library provides a full-featured OpenRouter API client with:
 
 ---
 
-### [Priority: Medium] Image/Vision Support
+### ~~[Priority: Medium] Image/Vision Support~~ ✅ COMPLETED (v0.4.0)
 
 **Description:** Add support for multimodal messages with image content (base64 or URL).
 
-**Rationale:** Many models support vision capabilities. This is increasingly common for Claude, GPT-4V, and other frontier models.
+**Implementation:**
+- Added `ImageSource` type with `.url` and `.base64` variants
+- Added `ContentPart` type with `.text` and `.image` variants
+- Added `MessageContent` type with `.string` and `.parts` variants
+- Updated `Message.content` from `String` to `MessageContent`
+- Added helper constructors: `userWithImageUrl`, `userWithImageUrls`, `userWithBase64Image`, `userWithImages`
+- Added JSON serialization for all new types with roundtrip support
+- 18 new tests for vision/multimodal support
 
 **Affected Files:**
-- `Oracle/Core/Types.lean` - Add content parts (text, image_url)
-- `Oracle/Request/ChatRequest.lean` - Update JSON serialization for multimodal
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None
+- `Oracle/Core/Types.lean` - New types and message helpers
+- `Oracle/Request/ChatRequest.lean` - JSON instances for ContentPart, MessageContent
+- `Oracle/Response/ChatResponse.lean` - Updated to handle MessageContent
+- `Oracle/Client/Stream.lean` - Updated message preview logging
+- `Tests/Main.lean` - Vision test suite
 
 ---
 
@@ -345,6 +352,13 @@ Consider deeper integration with:
 
 ## Version History
 
+- **v0.4.0** - Multimodal/Vision support
+  - Added `ImageSource` type for URL and base64 image sources
+  - Added `ContentPart` type for text and image content parts
+  - Added `MessageContent` type to support both string and multipart content
+  - Updated `Message.content` from `String` to `MessageContent` (backward compatible)
+  - Added helper constructors: `userWithImageUrl`, `userWithImageUrls`, `userWithBase64Image`, `userWithImages`
+  - Full JSON roundtrip support for multimodal messages
 - **v0.3.0** - Models endpoint, automatic retry, extended parameters
   - Added `GET /api/v1/models` endpoint with `listModels`, `getModel` methods
   - Added `Oracle/Retry.lean` with exponential backoff and jitter
