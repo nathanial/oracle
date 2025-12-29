@@ -15,7 +15,7 @@ A type-safe OpenRouter API client library for Lean 4.
 Add to your `lakefile.lean`:
 
 ```lean
-require oracle from ".." / "oracle"  -- or path to oracle
+require oracle from git "https://github.com/nathanial/oracle" @ "v0.0.1"
 ```
 
 ## Quick Start
