@@ -5,10 +5,9 @@ package oracle where
   version := v!"0.1.0"
   precompileModules := true
 
--- Local workspace dependencies
-require wisp from ".." / "wisp"
-require crucible from ".." / "crucible"
-require chronicle from ".." / "chronicle"
+require wisp from git "https://github.com/nathanial/wisp" @ "v0.0.1"
+require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.1"
+require chronicle from git "https://github.com/nathanial/chronicle" @ "v0.0.1"
 
 -- Curl link args (inherited from wisp, but needed for our executables)
 def curlLinkArgs : Array String :=
