@@ -12,6 +12,26 @@ namespace Oracle
 
 open Lean Json
 
+-- ============================================================================
+-- Image Generation Types
+-- ============================================================================
+
+/-- Modality types supported by OpenRouter -/
+inductive Modality where
+  | text
+  | image
+  deriving Repr, BEq, Inhabited
+
+/-- Image generation configuration -/
+structure ImageConfig where
+  /-- Aspect ratio (e.g., "16:9", "1:1", "9:16") -/
+  aspectRatio : Option String := none
+  deriving Inhabited
+
+-- ============================================================================
+-- Response Format
+-- ============================================================================
+
 /-- Response format specification -/
 inductive ResponseFormat where
   | text
@@ -63,6 +83,10 @@ structure ChatRequest where
   topLogprobs : Option Nat := none
   /-- Whether to allow parallel tool calls -/
   parallelToolCalls : Option Bool := none
+  /-- Modalities for the request (e.g., ["text", "image"] for image generation) -/
+  modalities : Option (Array Modality) := none
+  /-- Image generation configuration -/
+  imageConfig : Option ImageConfig := none
   deriving Inhabited
 
 namespace ChatRequest
@@ -146,6 +170,12 @@ def withFrequencyPenalty (r : ChatRequest) (penalty : Float) : ChatRequest :=
 /-- Set seed for reproducibility -/
 def withSeed (r : ChatRequest) (seed : Nat) : ChatRequest :=
   { r with seed := some seed }
+
+/-- Enable image generation modality -/
+def withImageGeneration (r : ChatRequest) (aspectRatio : Option String := none) : ChatRequest :=
+  { r with
+    modalities := some #[.text, .image]
+    imageConfig := if aspectRatio.isSome then some { aspectRatio } else none }
 
 end ChatRequest
 
@@ -340,6 +370,37 @@ instance : ToJson ResponseFormat where
 
 end ResponseFormat
 
+namespace Modality
+
+instance : ToJson Modality where
+  toJson
+    | .text => Json.str "text"
+    | .image => Json.str "image"
+
+instance : FromJson Modality where
+  fromJson? json := do
+    let s ← json.getStr?
+    match s with
+    | "text" => return .text
+    | "image" => return .image
+    | _ => throw s!"Invalid modality: {s}"
+
+end Modality
+
+namespace ImageConfig
+
+instance : ToJson ImageConfig where
+  toJson cfg := Json.withOptionalFields [
+    ("aspect_ratio", cfg.aspectRatio.map Json.str)
+  ]
+
+instance : FromJson ImageConfig where
+  fromJson? json := do
+    let aspectRatio := json.getObjValAs? String "aspect_ratio" |>.toOption
+    return { aspectRatio }
+
+end ImageConfig
+
 namespace ChatRequest
 
 /-- Convert logit bias list to JSON object -/
@@ -368,7 +429,9 @@ instance : ToJson ChatRequest where
     ("logit_bias", req.logitBias.map logitBiasToJson),
     ("logprobs", req.logprobs.map Json.bool),
     ("top_logprobs", req.topLogprobs.map toJson),
-    ("parallel_tool_calls", req.parallelToolCalls.map Json.bool)
+    ("parallel_tool_calls", req.parallelToolCalls.map Json.bool),
+    ("modalities", req.modalities.map toJson),
+    ("image_config", req.imageConfig.map toJson)
   ]
 
 /-- Convert request to JSON string -/

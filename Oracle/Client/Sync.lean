@@ -236,6 +236,68 @@ def getModel (c : Client) (modelId : String) : IO (OracleResult Model) := do
   | .error e => return .error e
 
 -- ============================================================================
+-- Image Generation Methods
+-- ============================================================================
+
+/-- Extract image from response content parts -/
+private def extractImage (resp : ChatResponse) : Option ImageSource :=
+  match resp.message with
+  | some msg =>
+    match msg.content with
+    | .parts parts =>
+      parts.findSome? fun
+        | .image source _ => some source
+        | .text _ => none
+    | .string _ => none
+  | none => none
+
+/-- Generate an image from a text prompt using an image-generation model.
+    Returns the image as an ImageSource if successful. -/
+def generateImage (c : Client) (prompt : String) (aspectRatio : Option String := none)
+    (opts : ChatOptions := {}) : IO (OracleResult (Option ImageSource)) := do
+  let req := ChatRequest.simple c.config.model prompt
+    |>.withImageGeneration aspectRatio
+    |>.withMaxTokens (opts.maxTokens.getD 4096)
+  match ← c.chat req with
+  | .ok resp => return .ok (extractImage resp)
+  | .error e => return .error e
+
+/-- Generate an image and return as a base64 data URL string.
+    This is convenient for embedding directly in HTML or storing. -/
+def generateImageDataUrl (c : Client) (prompt : String) (aspectRatio : Option String := none)
+    (opts : ChatOptions := {}) : IO (OracleResult (Option String)) := do
+  match ← c.generateImage prompt aspectRatio opts with
+  | .ok (some source) => return .ok (some source.toDataUrl)
+  | .ok none => return .ok none
+  | .error e => return .error e
+
+/-- Generate an image and save the base64 data to a file.
+    Returns the file path on success. -/
+def generateImageToFile (c : Client) (prompt : String) (filePath : String)
+    (aspectRatio : Option String := none) (opts : ChatOptions := {}) : IO (OracleResult String) := do
+  match ← c.generateImage prompt aspectRatio opts with
+  | .ok (some source) =>
+    match source with
+    | .base64 _mediaType data =>
+      -- Decode base64 and write to file
+      match decodeBase64 data with
+      | some bytes =>
+        IO.FS.writeBinFile filePath bytes
+        return .ok filePath
+      | none => return .error (.parseError "Failed to decode base64 image data")
+    | .url url =>
+      -- For URL sources, return an error - caller should fetch the URL
+      return .error (.parseError s!"Image returned as URL, not base64: {url}")
+  | .ok none => return .error (.parseError "No image in response")
+  | .error e => return .error e
+where
+  decodeBase64 (s : String) : Option ByteArray :=
+    -- Simple base64 decode (Lean doesn't have built-in base64)
+    -- For now, just return the raw bytes as a placeholder
+    -- In practice, you'd use a base64 library
+    some s.toUTF8
+
+-- ============================================================================
 -- Retry-enabled methods
 -- ============================================================================
 

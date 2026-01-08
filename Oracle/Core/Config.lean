@@ -68,4 +68,18 @@ def modelsEndpoint (c : Config) : String :=
 
 end Config
 
+-- Predefined model identifiers
+namespace Models
+
+/-- Google Gemini 2.5 Flash for image generation (Nano Banana) -/
+def geminiFlashImage : String := "google/gemini-2.5-flash-image"
+
+/-- Google Gemini 3 Pro for image generation (Nano Banana Pro) -/
+def geminiProImage : String := "google/gemini-3-pro-image-preview"
+
+/-- Default Claude model -/
+def claudeSonnet : String := "anthropic/claude-sonnet-4"
+
+end Models
+
 end Oracle
