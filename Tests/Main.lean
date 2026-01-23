@@ -166,7 +166,7 @@ test "ToolCall toJson/fromJson roundtrip" := do
     shouldBe parsed.function.name tc.function.name
   | .error e => throw (IO.userError s!"Failed to parse: {e}")
 
-#generate_tests
+
 
 end Tests.JsonTests
 
@@ -213,7 +213,7 @@ test "ChatRequest toJson includes required fields" := do
   | .ok _ => pure ()
   | .error _ => throw (IO.userError "Missing messages")
 
-#generate_tests
+
 
 end Tests.RequestTests
 
@@ -246,7 +246,7 @@ test "Config.generationEndpoint with custom base URL" := do
   let cfg : Config := { apiKey := "key", baseUrl := "https://custom.api/v1" }
   shouldBe (cfg.generationEndpoint "abc") "https://custom.api/v1/generation?id=abc"
 
-#generate_tests
+
 
 end Tests.ConfigTests
 
@@ -275,7 +275,7 @@ test "OracleError toString" := do
   let s := toString err
   shouldSatisfy (s.containsSubstr "404") "error message contains status code"
 
-#generate_tests
+
 
 end Tests.ErrorTests
 
@@ -337,7 +337,7 @@ test "GenerationStats fromJson handles optional fields" := do
     shouldBe stats.appId (some 12345)
   | .error e => throw (IO.userError s!"Parse failed: {e}")
 
-#generate_tests
+
 
 end Tests.ResponseTests
 
@@ -383,7 +383,7 @@ test "withOptionalFields handles empty list" := do
   | .ok obj => shouldBe obj.size 0
   | .error _ => throw (IO.userError "Expected object")
 
-#generate_tests
+
 
 end Tests.JsonUtilsTests
 
@@ -456,7 +456,7 @@ test "ModelsResponse withTools filters correctly" := do
   shouldBe toolModels.size 1
   shouldBe toolModels[0]!.id "with-tools"
 
-#generate_tests
+
 
 end Tests.ModelTests
 
@@ -491,7 +491,7 @@ test "RetryConfig.delayForAttempt respects maxDelayMs" := do
   shouldBe (cfg.delayForAttempt 2) 3000  -- Capped at max
   shouldBe (cfg.delayForAttempt 3) 3000  -- Still capped
 
-#generate_tests
+
 
 end Tests.RetryTests
 
@@ -544,7 +544,7 @@ test "ChatRequest toJson includes logit_bias as object" := do
     | .error _ => throw (IO.userError "Missing token 100 in logit_bias")
   | .error _ => throw (IO.userError "Missing logit_bias")
 
-#generate_tests
+
 
 end Tests.NewParamsTests
 
@@ -560,7 +560,7 @@ test "Config.modelsEndpoint returns correct URL" := do
   let cfg := Config.simple "key"
   shouldBe cfg.modelsEndpoint "https://openrouter.ai/api/v1/models"
 
-#generate_tests
+
 
 end Tests.EndpointTests
 
@@ -755,7 +755,7 @@ test "Message with multimodal content roundtrips" := do
     | .string _ => throw (IO.userError "Expected parts after roundtrip")
   | .error e => throw (IO.userError s!"Failed to parse: {e}")
 
-#generate_tests
+
 
 end Tests.VisionTests
 
