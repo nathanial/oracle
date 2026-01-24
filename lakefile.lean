@@ -3,7 +3,7 @@ open Lake DSL System
 
 package oracle where
   version := v!"0.2.0"
-  precompileModules := true
+  precompileModules := false
 
 require wisp from git "https://github.com/nathanial/wisp" @ "v0.0.1"
 require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.9"
@@ -29,6 +29,9 @@ def curlLinkArgs : Array String :=
 lean_lib Oracle where
   roots := #[`Oracle]
   moreLinkArgs := curlLinkArgs
+
+lean_lib Tests where
+  globs := #[.submodules `Tests]
 
 @[test_driver]
 lean_exe oracle_tests where
