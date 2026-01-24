@@ -2,12 +2,13 @@ import Lake
 open Lake DSL System
 
 package oracle where
-  version := v!"0.1.0"
+  version := v!"0.2.0"
   precompileModules := true
 
 require wisp from git "https://github.com/nathanial/wisp" @ "v0.0.1"
 require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.9"
 require chronicle from git "https://github.com/nathanial/chronicle" @ "v0.0.1"
+require reactive from git "https://github.com/nathanial/reactive" @ "v0.2.0"
 
 -- Curl link args (inherited from wisp, but needed for our executables)
 def curlLinkArgs : Array String :=
