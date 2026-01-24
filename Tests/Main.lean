@@ -4,9 +4,11 @@
 
 import Crucible
 import Oracle
+import Oracle.Agent
 
 open Crucible
 open Oracle
+open Oracle.Agent
 
 /-- Check if a string contains a substring -/
 def String.containsSubstr (s : String) (sub : String) : Bool :=
@@ -758,6 +760,485 @@ test "Message with multimodal content roundtrips" := do
 
 
 end Tests.VisionTests
+
+-- ============================================================================
+-- Agentic Loop tests
+-- ============================================================================
+
+namespace Tests.AgentTests
+
+testSuite "Agentic Loop"
+
+test "single tool call and response" := do
+  -- Setup: mock returns tool call, then final response
+  let toolCall := mockToolCall "call_1" "get_weather" "{\"city\":\"NYC\"}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "The weather in NYC is sunny."
+
+  let mock ← MockChat.new #[resp1, resp2]
+
+  -- Tool that returns weather
+  let weatherTool := ToolHandler.withDescription "get_weather" "Get weather for a city" fun _args =>
+    return .ok "Sunny, 72°F"
+
+  let registry := ToolRegistry.empty.register weatherTool
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "What's the weather in NYC?"] 0
+
+  shouldBe result.iterations 2
+  shouldBe result.finalContent (some "The weather in NYC is sunny.")
+  shouldSatisfy result.isSuccess "should complete successfully"
+
+test "max iterations prevents infinite loop" := do
+  -- Mock always returns tool calls
+  let toolCall := mockToolCall "call_1" "search" "{}"
+  let resp := mockResponseWithToolCalls "resp" #[toolCall]
+  -- Create array of 20 identical responses
+  let responses := #[resp, resp, resp, resp, resp, resp, resp, resp, resp, resp,
+                     resp, resp, resp, resp, resp, resp, resp, resp, resp, resp]
+  let mock ← MockChat.new responses
+
+  let searchTool := ToolHandler.simple "search" fun _ => return .ok "found"
+  let registry := ToolRegistry.empty.register searchTool
+  let config : AgentConfig := { maxIterations := 3, registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Search forever"] 0
+
+  shouldBe result.iterations 3
+  shouldSatisfy result.hitToolLimit "should hit tool limit"
+
+test "handles tool execution error gracefully" := do
+  let toolCall := mockToolCall "call_1" "failing_tool" "{}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "I encountered an error."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let failingTool := ToolHandler.simple "failing_tool" fun _ =>
+    return .error "Tool crashed!"
+
+  let registry := ToolRegistry.empty.register failingTool
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Run failing tool"] 0
+
+  -- Should continue with error message as tool response
+  shouldBe result.iterations 2
+  -- Check that the tool response contains the error
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 1
+  shouldSatisfy (toolResponses[0]!.content.asString.containsSubstr "Error") "tool response should contain error"
+
+test "multiple tool calls in single response" := do
+  let toolCalls := #[
+    mockToolCall "call_1" "tool_a" "{}",
+    mockToolCall "call_2" "tool_b" "{}"
+  ]
+  let resp1 := mockResponseWithToolCalls "resp_1" toolCalls
+  let resp2 := mockResponseWithContent "resp_2" "Done with both tools."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let toolA := ToolHandler.simple "tool_a" fun _ => return .ok "A result"
+  let toolB := ToolHandler.simple "tool_b" fun _ => return .ok "B result"
+  let registry := ToolRegistry.empty.register toolA |>.register toolB
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Run both tools"] 0
+
+  shouldBe result.iterations 2
+  -- Messages should have both tool responses
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 2
+
+test "no tool calls returns immediately" := do
+  let resp := mockResponseWithContent "resp_1" "Hello! How can I help?"
+  let mock ← MockChat.new #[resp]
+
+  let config : AgentConfig := { registry := ToolRegistry.empty }
+  let result ← runAgentLoop mock.call config #[Message.user "Hello"] 0
+
+  shouldBe result.iterations 1
+  shouldBe result.finalContent (some "Hello! How can I help?")
+  shouldSatisfy result.isSuccess "should complete successfully"
+
+test "API error propagates correctly" := do
+  -- Create a mock that returns an error
+  let errorMock : ChatFunction := fun _ =>
+    return .error (OracleError.networkError "Connection failed")
+
+  let config : AgentConfig := { registry := ToolRegistry.empty }
+  let result ← runAgentLoop errorMock config #[Message.user "Hello"] 0
+
+  shouldSatisfy result.isError "should have error state"
+  match result.error? with
+  | some (OracleError.networkError msg) => shouldBe msg "Connection failed"
+  | _ => throw (IO.userError "Expected network error")
+
+test "tool with JSON arguments" := do
+  let toolCall := mockToolCall "call_1" "calculate" "{\"x\":10,\"y\":5,\"op\":\"add\"}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "The result is 15."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let calcTool := ToolHandler.withDescription "calculate" "Perform calculation" fun args => do
+    let x := args.getObjValAs? Int "x" |>.toOption |>.getD 0
+    let y := args.getObjValAs? Int "y" |>.toOption |>.getD 0
+    let op := args.getObjValAs? String "op" |>.toOption |>.getD "add"
+    let result := if op == "add" then x + y else x - y
+    return .ok s!"{result}"
+
+  let registry := ToolRegistry.empty.register calcTool
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Calculate 10 + 5"] 0
+
+  shouldBe result.iterations 2
+  shouldSatisfy result.isSuccess "should complete successfully"
+
+test "unknown tool returns error message" := do
+  let toolCall := mockToolCall "call_1" "unknown_tool" "{}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "I couldn't find that tool."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  -- Empty registry - tool won't be found
+  let config : AgentConfig := { registry := ToolRegistry.empty }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Use unknown tool"] 0
+
+  shouldBe result.iterations 2
+  -- The tool response should contain "Unknown tool"
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 1
+  shouldSatisfy (toolResponses[0]!.content.asString.containsSubstr "Unknown tool") "should mention unknown tool"
+
+test "runAgent with system prompt" := do
+  let resp := mockResponseWithContent "resp_1" "I am a helpful assistant."
+  let mock ← MockChat.new #[resp]
+
+  let config : AgentConfig := {
+    registry := ToolRegistry.empty
+    systemPrompt := some "You are a helpful assistant."
+  }
+
+  let result ← runAgent mock.call config "Hello"
+
+  shouldBe result.iterations 1
+  -- Should have system message first
+  shouldBe result.messages[0]!.role Role.system
+  shouldBe result.messages[1]!.role Role.user
+
+test "multi-turn tool usage" := do
+  -- First: model calls tool A
+  let call1 := mockToolCall "call_1" "search" "{\"query\":\"weather\"}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[call1]
+
+  -- Second: model calls tool B based on search results
+  let call2 := mockToolCall "call_2" "format" "{\"data\":\"sunny\"}"
+  let resp2 := mockResponseWithToolCalls "resp_2" #[call2]
+
+  -- Third: model returns final answer
+  let resp3 := mockResponseWithContent "resp_3" "Based on my search, the weather is sunny and formatted nicely."
+  let mock ← MockChat.new #[resp1, resp2, resp3]
+
+  let searchTool := ToolHandler.simple "search" fun _ => return .ok "sunny"
+  let formatTool := ToolHandler.simple "format" fun _ => return .ok "**sunny**"
+  let registry := ToolRegistry.empty.register searchTool |>.register formatTool
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "What's the weather?"] 0
+
+  shouldBe result.iterations 3
+  shouldSatisfy result.isSuccess "should complete successfully"
+  -- Should have multiple tool responses
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 2
+
+test "empty tool calls array treated as completion" := do
+  -- Response with empty tool calls array (some models do this)
+  let message : Message := {
+    role := .assistant
+    content := .string "Here's my answer."
+    toolCalls := some #[]  -- Empty array
+  }
+  let choice : Choice := {
+    index := 0
+    message := message
+    finishReason := some "stop"
+  }
+  let resp : ChatResponse := {
+    id := "resp_1"
+    model := "mock-model"
+    choices := #[choice]
+  }
+  let mock ← MockChat.new #[resp]
+
+  let config : AgentConfig := { registry := ToolRegistry.empty }
+  let result ← runAgentLoop mock.call config #[Message.user "Hello"] 0
+
+  shouldBe result.iterations 1
+  shouldBe result.finalContent (some "Here's my answer.")
+  shouldSatisfy result.isSuccess "should complete successfully"
+
+end Tests.AgentTests
+
+-- ============================================================================
+-- Agent Types tests
+-- ============================================================================
+
+namespace Tests.AgentTypesTests
+
+testSuite "Agent Types"
+
+test "ToolRegistry.empty has no handlers" := do
+  let reg := ToolRegistry.empty
+  shouldBe reg.handlers.size 0
+  shouldBe reg.tools.size 0
+
+test "ToolRegistry.register adds handler" := do
+  let handler := ToolHandler.simple "test" fun _ => return .ok "done"
+  let reg := ToolRegistry.empty.register handler
+  shouldBe reg.handlers.size 1
+  shouldBe reg.tools.size 1
+  shouldBe reg.tools[0]!.function.name "test"
+
+test "ToolRegistry.findHandler finds by name" := do
+  let handler := ToolHandler.simple "my_tool" fun _ => return .ok "result"
+  let reg := ToolRegistry.empty.register handler
+  match reg.findHandler "my_tool" with
+  | some h => shouldBe h.tool.function.name "my_tool"
+  | none => throw (IO.userError "Handler not found")
+
+test "ToolRegistry.findHandler returns none for unknown" := do
+  let reg := ToolRegistry.empty
+  shouldBe (reg.findHandler "unknown").isNone true
+
+test "ToolRegistry.execute runs handler" := do
+  let handler := ToolHandler.simple "echo" fun args =>
+    let msg := args.getObjValAs? String "message" |>.toOption |>.getD "default"
+    return .ok s!"Echo: {msg}"
+  let reg := ToolRegistry.empty.register handler
+
+  match ← reg.execute "echo" (Lean.Json.mkObj [("message", Lean.Json.str "hello")]) with
+  | .ok result => shouldBe result "Echo: hello"
+  | .error e => throw (IO.userError s!"Unexpected error: {e}")
+
+test "ToolRegistry.execute returns error for unknown tool" := do
+  let reg := ToolRegistry.empty
+  match ← reg.execute "unknown" Lean.Json.null with
+  | .ok _ => throw (IO.userError "Expected error for unknown tool")
+  | .error msg => shouldSatisfy (msg.containsSubstr "Unknown tool") "should mention unknown tool"
+
+test "AgentConfig default values" := do
+  let config : AgentConfig := {}
+  shouldBe config.maxIterations 10
+  shouldBe config.model "anthropic/claude-sonnet-4"
+  shouldBe config.systemPrompt none
+  shouldBe config.tools.size 0
+
+test "AgentConfig.withModel sets model" := do
+  let config := AgentConfig.withRegistry ToolRegistry.empty |>.withModel "gpt-4"
+  shouldBe config.model "gpt-4"
+
+test "AgentConfig.withSystemPrompt sets prompt" := do
+  let config := (default : AgentConfig).withSystemPrompt "Be helpful"
+  shouldBe config.systemPrompt (some "Be helpful")
+
+test "AgentConfig.withMaxIterations sets limit" := do
+  let config := (default : AgentConfig).withMaxIterations 5
+  shouldBe config.maxIterations 5
+
+test "AgentState predicates" := do
+  let running := AgentState.running #[] 0
+  let completed := AgentState.completed #[] "done"
+  let toolLimit := AgentState.toolLimit #[]
+  let error := AgentState.error #[] (OracleError.networkError "fail")
+
+  shouldBe running.isRunning true
+  shouldBe running.isTerminal false
+
+  shouldBe completed.isCompleted true
+  shouldBe completed.isTerminal true
+
+  shouldBe toolLimit.isToolLimit true
+  shouldBe toolLimit.isTerminal true
+
+  shouldBe error.isError true
+  shouldBe error.isTerminal true
+
+test "AgentState.finalContent?" := do
+  let completed := AgentState.completed #[] "my content"
+  let running := AgentState.running #[] 0
+
+  shouldBe completed.finalContent? (some "my content")
+  shouldBe running.finalContent? none
+
+test "AgentState.error?" := do
+  let err := OracleError.authError "bad key"
+  let errorState := AgentState.error #[] err
+  let completed := AgentState.completed #[] "done"
+
+  match errorState.error? with
+  | some (OracleError.authError msg) => shouldBe msg "bad key"
+  | _ => throw (IO.userError "Expected auth error")
+
+  shouldBe completed.error?.isNone true
+
+end Tests.AgentTypesTests
+
+-- ============================================================================
+-- Mock Client tests
+-- ============================================================================
+
+namespace Tests.MockClientTests
+
+testSuite "Mock Client"
+
+test "MockChat returns responses in sequence" := do
+  let resp1 := mockResponseWithContent "r1" "First"
+  let resp2 := mockResponseWithContent "r2" "Second"
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let dummyReq : ChatRequest := ChatRequest.simple "model" "test"
+
+  match ← mock.call dummyReq with
+  | .ok r => shouldBe r.content (some "First")
+  | .error _ => throw (IO.userError "Expected success")
+
+  match ← mock.call dummyReq with
+  | .ok r => shouldBe r.content (some "Second")
+  | .error _ => throw (IO.userError "Expected success")
+
+test "MockChat returns error when exhausted" := do
+  let resp := mockResponseWithContent "r1" "Only one"
+  let mock ← MockChat.new #[resp]
+
+  let dummyReq : ChatRequest := ChatRequest.simple "model" "test"
+
+  -- First call succeeds
+  match ← mock.call dummyReq with
+  | .ok _ => pure ()
+  | .error _ => throw (IO.userError "First call should succeed")
+
+  -- Second call fails
+  match ← mock.call dummyReq with
+  | .ok _ => throw (IO.userError "Should have failed")
+  | .error (OracleError.apiError code _) => shouldBe code "mock_exhausted"
+  | .error _ => throw (IO.userError "Expected apiError")
+
+test "MockChat.reset restarts sequence" := do
+  let resp := mockResponseWithContent "r1" "Response"
+  let mock ← MockChat.new #[resp]
+
+  let dummyReq : ChatRequest := ChatRequest.simple "model" "test"
+
+  -- First call
+  let _ ← mock.call dummyReq
+
+  -- Reset and call again
+  mock.reset
+  match ← mock.call dummyReq with
+  | .ok r => shouldBe r.content (some "Response")
+  | .error _ => throw (IO.userError "Should succeed after reset")
+
+test "MockChat.callCount tracks calls" := do
+  let resp := mockResponseWithContent "r1" "Test"
+  let mock ← MockChat.new #[resp, resp, resp]
+
+  let dummyReq : ChatRequest := ChatRequest.simple "model" "test"
+
+  shouldBe (← mock.callCount) 0
+
+  let _ ← mock.call dummyReq
+  shouldBe (← mock.callCount) 1
+
+  let _ ← mock.call dummyReq
+  shouldBe (← mock.callCount) 2
+
+test "mockResponseWithToolCalls creates valid response" := do
+  let toolCall := mockToolCall "id_1" "my_func" "{\"arg\":1}"
+  let resp := mockResponseWithToolCalls "resp_id" #[toolCall]
+
+  shouldBe resp.id "resp_id"
+  shouldBe resp.hasToolCalls true
+  match resp.toolCalls with
+  | some calls =>
+    shouldBe calls.size 1
+    shouldBe calls[0]!.id "id_1"
+    shouldBe calls[0]!.function.name "my_func"
+  | none => throw (IO.userError "Expected tool calls")
+
+test "mockResponseWithContent creates valid response" := do
+  let resp := mockResponseWithContent "resp_id" "Hello world"
+
+  shouldBe resp.id "resp_id"
+  shouldBe resp.content (some "Hello world")
+  shouldBe resp.hasToolCalls false
+
+test "mockToolCall creates valid tool call" := do
+  let tc := mockToolCall "call_123" "search" "{\"query\":\"test\"}"
+
+  shouldBe tc.id "call_123"
+  shouldBe tc.type "function"
+  shouldBe tc.function.name "search"
+  shouldBe tc.function.arguments "{\"query\":\"test\"}"
+
+end Tests.MockClientTests
+
+-- ============================================================================
+-- Agent Result tests
+-- ============================================================================
+
+namespace Tests.AgentResultTests
+
+testSuite "Agent Result"
+
+test "AgentResult.isSuccess for completed state" := do
+  let result : AgentResult := {
+    messages := #[]
+    finalContent := some "done"
+    iterations := 1
+    state := .completed #[] "done"
+  }
+  shouldBe result.isSuccess true
+  shouldBe result.hitToolLimit false
+  shouldBe result.isError false
+
+test "AgentResult.hitToolLimit for toolLimit state" := do
+  let result : AgentResult := {
+    messages := #[]
+    finalContent := none
+    iterations := 10
+    state := .toolLimit #[]
+  }
+  shouldBe result.isSuccess false
+  shouldBe result.hitToolLimit true
+  shouldBe result.isError false
+
+test "AgentResult.isError for error state" := do
+  let result : AgentResult := {
+    messages := #[]
+    finalContent := none
+    iterations := 1
+    state := .error #[] (OracleError.networkError "fail")
+  }
+  shouldBe result.isSuccess false
+  shouldBe result.hitToolLimit false
+  shouldBe result.isError true
+
+test "AgentResult.error? returns error" := do
+  let err := OracleError.rateLimitError (some 30)
+  let result : AgentResult := {
+    messages := #[]
+    finalContent := none
+    iterations := 1
+    state := .error #[] err
+  }
+  match result.error? with
+  | some (OracleError.rateLimitError _) => pure ()
+  | _ => throw (IO.userError "Expected rate limit error")
+
+end Tests.AgentResultTests
 
 -- ============================================================================
 -- Main entry point

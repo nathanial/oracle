@@ -30,10 +30,6 @@ lean_lib Oracle where
   roots := #[`Oracle]
   moreLinkArgs := curlLinkArgs
 
-lean_lib Tests where
-  roots := #[`Tests]
-  moreLinkArgs := curlLinkArgs
-
 @[test_driver]
 lean_exe oracle_tests where
   root := `Tests.Main
