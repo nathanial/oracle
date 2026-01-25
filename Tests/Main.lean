@@ -25,6 +25,7 @@ import Tests.AgentTypesTests
 import Tests.MockClientTests
 import Tests.AgentResultTests
 import Tests.StreamAccumulatorTests
+import Tests.ImageOutputTests
 
 open Crucible
 

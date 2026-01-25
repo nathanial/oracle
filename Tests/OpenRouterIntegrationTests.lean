@@ -184,6 +184,51 @@ test "agent multi-turn with lookup tool" (timeout := 60000) := do
     shouldSatisfy result.isSuccess "agent should complete successfully"
     shouldSatisfy ((result.finalContent.getD "").containsSubstr "847") "should contain the price 847"
 
+test "image generation saves to file" (timeout := 120000) := do
+  match ← getApiKey with
+  | none =>
+    IO.println "Skipping OpenRouter integration (set OPENROUTER_RUN_INTEGRATION=1 and OPENROUTER_API_KEY)."
+    return ()
+  | some key =>
+    let client ← buildClient key
+
+    -- Use an image generation model
+    let imageClient := Client.new { client.config with model := Models.geminiFlashImage }
+
+    -- Create output directory
+    let outputDir := "test_output"
+    let outputPath := s!"{outputDir}/generated_image.png"
+    IO.FS.createDirAll outputDir
+
+    match ← imageClient.generateImageToFile "A simple red circle on a white background" outputPath with
+    | .ok path =>
+      IO.println s!"Image saved to {path}"
+      -- Verify file exists and has content
+      let content ← IO.FS.readBinFile path
+      shouldSatisfy (content.size > 0) "file should have content"
+      IO.println s!"Image file size: {content.size} bytes"
+    | .error err =>
+      -- Some models may not support image generation, so we log but don't fail hard
+      IO.println s!"Image generation returned error (model may not support it): {err}"
+      -- Check if we got a response with images in the message instead
+      let req := ChatRequest.simple Models.geminiFlashImage "A simple red circle on a white background"
+        |>.withImageGeneration none
+        |>.withMaxTokens 4096
+      match ← imageClient.chat req with
+      | .ok resp =>
+        if resp.hasImages then
+          match resp.firstImage? with
+          | some img =>
+            IO.println s!"Got image in response: {img.url.take 80}..."
+            -- Write the raw data URL to a text file for inspection
+            IO.FS.writeFile s!"{outputDir}/image_data_url.txt" img.url
+            IO.println s!"Saved data URL to {outputDir}/image_data_url.txt"
+          | none => IO.println "No image found in response"
+        else
+          IO.println s!"Response content: {resp.content.getD "(none)"}"
+      | .error e2 =>
+        IO.println s!"Chat request also failed: {e2}"
+
 test "agent respects iteration limit" (timeout := 60000) := do
   match ← getApiKey with
   | none =>

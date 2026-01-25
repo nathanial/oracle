@@ -55,6 +55,55 @@ def toDataUrl : ImageSource → String
 
 end ImageSource
 
+/-- An image output from a model response -/
+structure ImageOutput where
+  /-- The image URL (typically a base64 data URL like "data:image/png;base64,...") -/
+  url : String
+  deriving Repr, Inhabited, BEq
+
+namespace ImageOutput
+
+/-- Check if this is a base64 data URL -/
+def isBase64 (img : ImageOutput) : Bool :=
+  img.url.startsWith "data:"
+
+/-- Extract the media type from a data URL (e.g., "image/png") -/
+def mediaType? (img : ImageOutput) : Option String :=
+  if img.url.startsWith "data:" then
+    let rest := img.url.drop 5  -- drop "data:"
+    some (rest.takeWhile (· != ';'))
+  else
+    none
+
+/-- Find the position of a substring in a string, returning the character offset -/
+private def findSubstr (s : String) (sub : String) : Option Nat := Id.run do
+  if sub.isEmpty then return none
+  let subLen := sub.length
+  let sLen := s.length
+  for i in [:sLen] do
+    if i + subLen > sLen then return none
+    let slice := (s.drop i).take subLen
+    if slice == sub then return some i
+  return none
+
+/-- Extract raw base64 data from a data URL -/
+def base64Data? (img : ImageOutput) : Option String :=
+  let marker := ";base64,"
+  match findSubstr img.url marker with
+  | some idx => some (img.url.drop (idx + marker.length))
+  | none => none
+
+/-- Convert an ImageOutput to an ImageSource -/
+def toImageSource (img : ImageOutput) : ImageSource :=
+  if img.isBase64 then
+    match img.mediaType?, img.base64Data? with
+    | some mediaType, some data => .base64 mediaType data
+    | _, _ => .url img.url
+  else
+    .url img.url
+
+end ImageOutput
+
 /-- A content part in a multimodal message -/
 inductive ContentPart where
   | text (content : String)
@@ -98,6 +147,7 @@ structure Message where
   name : Option String := none
   toolCallId : Option String := none  -- For tool responses
   toolCalls : Option (Array ToolCall) := none  -- For assistant messages with tool calls
+  images : Option (Array ImageOutput) := none  -- For image generation responses
   deriving Repr, Inhabited
 
 namespace Message
@@ -144,6 +194,16 @@ def userWithImages (text : String) (images : Array ImageSource) (detail : String
   content := .parts (#[.text text] ++ images.map fun src => .image src detail)
 }
 
+/-- Check if message contains generated images -/
+def hasImages (msg : Message) : Bool :=
+  match msg.images with
+  | some imgs => imgs.size > 0
+  | none => false
+
+/-- Get the first image if any -/
+def firstImage? (msg : Message) : Option ImageOutput :=
+  msg.images >>= (·[0]?)
+
 /-- Format a message for debugging output -/
 def format (msg : Message) (indent : String := "") : String :=
   let roleLabel := msg.role.toString.toUpper
@@ -154,7 +214,12 @@ def format (msg : Message) (indent : String := "") : String :=
     | none => #[]
     | some calls => calls.map fun call =>
         s!"{indent}  → {call.function.name}({call.function.arguments})"
-  String.intercalate "\n" (lines ++ toolCallLines).toList
+  let imageLines := match msg.images with
+    | none => #[]
+    | some imgs => imgs.mapIdx fun i img =>
+        let preview := if img.url.length > 50 then img.url.take 50 ++ "..." else img.url
+        s!"{indent}  [IMAGE {i}] {preview}"
+  String.intercalate "\n" (lines ++ toolCallLines ++ imageLines).toList
 
 /-- Format an array of messages as a conversation -/
 def formatConversation (msgs : Array Message) (indent : String := "") : String :=

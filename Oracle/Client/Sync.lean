@@ -239,16 +239,31 @@ def getModel (c : Client) (modelId : String) : IO (OracleResult Model) := do
 -- Image Generation Methods
 -- ============================================================================
 
-/-- Extract image from response content parts -/
+/-- Extract all images from response (from images field) -/
+def extractImages (resp : ChatResponse) : Array ImageOutput :=
+  match resp.message with
+  | some msg => msg.images.getD #[]
+  | none => #[]
+
+/-- Extract first image from response (checks images field first, then content parts) -/
 private def extractImage (resp : ChatResponse) : Option ImageSource :=
   match resp.message with
   | some msg =>
-    match msg.content with
-    | .parts parts =>
-      parts.findSome? fun
-        | .image source _ => some source
-        | .text _ => none
-    | .string _ => none
+    -- First check the images field (new format from image generation models)
+    match msg.images with
+    | some imgs =>
+      if h : 0 < imgs.size then
+        some (imgs[0].toImageSource)
+      else
+        none
+    | none =>
+      -- Fall back to content parts (legacy format)
+      match msg.content with
+      | .parts parts =>
+        parts.findSome? fun
+          | .image source _ => some source
+          | .text _ => none
+      | .string _ => none
   | none => none
 
 /-- Generate an image from a text prompt using an image-generation model.
@@ -271,6 +286,48 @@ def generateImageDataUrl (c : Client) (prompt : String) (aspectRatio : Option St
   | .ok none => return .ok none
   | .error e => return .error e
 
+/-- Base64 decoding lookup table. Returns 255 for invalid characters, 0-63 for valid. -/
+private def base64DecodeTable : Array UInt8 := Id.run do
+  let mut table : Array UInt8 := Array.replicate 256 255
+  -- A-Z = 0-25
+  for i in [:26] do
+    table := table.set! ('A'.toNat + i) i.toUInt8
+  -- a-z = 26-51
+  for i in [:26] do
+    table := table.set! ('a'.toNat + i) (i + 26).toUInt8
+  -- 0-9 = 52-61
+  for i in [:10] do
+    table := table.set! ('0'.toNat + i) (i + 52).toUInt8
+  -- + = 62, / = 63
+  table := table.set! '+'.toNat 62
+  table := table.set! '/'.toNat 63
+  return table
+
+/-- Decode a base64 string to bytes -/
+private def decodeBase64 (s : String) : Option ByteArray := Id.run do
+  let chars := s.toList.filter fun c => c != '\n' && c != '\r' && c != ' '
+  let mut result := ByteArray.empty
+  let mut buffer : UInt32 := 0
+  let mut bits : Nat := 0
+
+  for c in chars do
+    if c == '=' then
+      continue  -- padding
+    let idx := c.toNat
+    if idx >= 256 then return none
+    let val := base64DecodeTable[idx]!
+    if val == 255 then return none
+
+    buffer := (buffer <<< 6) ||| val.toUInt32
+    bits := bits + 6
+
+    if bits >= 8 then
+      bits := bits - 8
+      let byte := ((buffer >>> bits.toUInt32) &&& 0xFF).toUInt8
+      result := result.push byte
+
+  return some result
+
 /-- Generate an image and save the base64 data to a file.
     Returns the file path on success. -/
 def generateImageToFile (c : Client) (prompt : String) (filePath : String)
@@ -290,12 +347,6 @@ def generateImageToFile (c : Client) (prompt : String) (filePath : String)
       return .error (.parseError s!"Image returned as URL, not base64: {url}")
   | .ok none => return .error (.parseError "No image in response")
   | .error e => return .error e
-where
-  decodeBase64 (s : String) : Option ByteArray :=
-    -- Simple base64 decode (Lean doesn't have built-in base64)
-    -- For now, just return the raw bytes as a placeholder
-    -- In practice, you'd use a base64 library
-    some s.toUTF8
 
 -- ============================================================================
 -- Retry-enabled methods

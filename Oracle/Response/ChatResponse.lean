@@ -60,12 +60,24 @@ instance : FromJson Choice where
         return { id := id, type := tcType, function := { name := name, arguments := arguments } : ToolCall }
       return calls
 
+    -- Parse images if present (for image generation responses)
+    let images : Option (Array ImageOutput) := do
+      let imagesJson ← messageJson.getObjVal? "images" |>.toOption
+      let arr ← imagesJson.getArr?.toOption
+      let imgs ← arr.mapM fun imgObj => do
+        -- Format: { "type": "image_url", "image_url": { "url": "..." } }
+        let imageUrlObj ← imgObj.getObjVal? "image_url" |>.toOption
+        let url ← imageUrlObj.getObjValAs? String "url" |>.toOption
+        return { url : ImageOutput }
+      return imgs
+
     let finishReason := json.getObjValAs? String "finish_reason" |>.toOption
 
     let message : Message := {
       role := role
       content := content
       toolCalls := toolCalls
+      images := images
     }
 
     return { index, message, finishReason }
@@ -122,6 +134,20 @@ def finishReason (r : ChatResponse) : Option String :=
     r.choices[0].finishReason
   else
     none
+
+/-- Get images from the first choice -/
+def images (r : ChatResponse) : Option (Array ImageOutput) :=
+  r.message >>= (·.images)
+
+/-- Check if the response contains images -/
+def hasImages (r : ChatResponse) : Bool :=
+  match r.images with
+  | some imgs => imgs.size > 0
+  | none => false
+
+/-- Get the first image from the response -/
+def firstImage? (r : ChatResponse) : Option ImageOutput :=
+  r.message >>= (·.firstImage?)
 
 end ChatResponse
 
