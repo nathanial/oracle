@@ -97,7 +97,7 @@ def new (client : ReactiveClient) (systemPrompt : Option String := none) : Spide
   let framedUpdateStream := fun v => env.withFrame (updateStream v)
 
   -- Current request cancellation
-  let currentCancelRef ← IO.mkRef (IO.pure () : IO Unit)
+  let currentCancelRef ← IO.mkRef (pure () : IO Unit)
   let conversationRef ← IO.mkRef initialConv
 
   -- Send message implementation

@@ -27,9 +27,50 @@ structure StreamOutput where
   /-- Fires when stream completes successfully -/
   completed : Evt StreamState
   /-- Fires when stream errors -/
-  errored : Evt String
+  errored : Evt OracleError
   /-- Cancel the stream (prevents further updates) -/
   cancel : IO Unit
+
+/-- Pump stream events into reactive updates (non-terminating). -/
+private partial def pumpStream (stream : ChatStream) (canceledRef : IO.Ref Bool)
+    (stateRef : IO.Ref StreamState)
+    (framedUpdateContent : String → IO Unit)
+    (framedUpdateToolCalls : Array ToolCallAccumulator → IO Unit)
+    (framedUpdateState : StreamState → IO Unit)
+    (framedFireChunk : StreamChunk → IO Unit)
+    (framedFireCompleted : StreamState → IO Unit) : IO Unit := do
+  let canceled ← canceledRef.get
+  if canceled then return ()
+
+  match ← stream.recv with
+  | none =>
+    let canceled ← canceledRef.get
+    if canceled then return ()
+
+    let finalState ← stateRef.get
+    let finalState := finalState.finish none
+    stateRef.set finalState
+    framedUpdateState finalState
+    framedFireCompleted finalState
+
+  | some chunk =>
+    let canceled ← canceledRef.get
+    if canceled then return ()
+
+    let state ← stateRef.get
+    let state' := state.mergeChunk chunk
+    stateRef.set state'
+
+    framedUpdateContent state'.content
+    framedUpdateToolCalls state'.toolCalls
+    framedUpdateState state'
+    framedFireChunk chunk
+
+    if state'.finished then
+      framedFireCompleted state'
+    else
+      pumpStream stream canceledRef stateRef framedUpdateContent framedUpdateToolCalls
+        framedUpdateState framedFireChunk framedFireCompleted
 
 /-- Convert a pull-based ChatStream into push-based reactive events.
 
@@ -50,7 +91,7 @@ def streamToEvents (stream : ChatStream) : SpiderM StreamOutput := ⟨fun env =>
   -- Create triggers for events
   let (chunksEvt, fireChunk) ← Reactive.Event.newTrigger env.timelineCtx
   let (completedEvt, fireCompleted) ← Reactive.Event.newTrigger env.timelineCtx
-  let (erroredEvt, fireErrored) ← Reactive.Event.newTrigger env.timelineCtx
+  let (erroredEvt, fireErrored) ← Reactive.Event.newTrigger (a := OracleError) env.timelineCtx
 
   -- Create dynamics for state
   let (contentDyn, updateContent) ← createDynamic env.timelineCtx ""
@@ -71,53 +112,17 @@ def streamToEvents (stream : ChatStream) : SpiderM StreamOutput := ⟨fun env =>
   -- Spawn background task to pump the stream
   let _ ← IO.asTask (prio := .dedicated) do
     let stateRef ← IO.mkRef StreamState.empty
-    let rec loop : IO Unit := do
-      let canceled ← canceledRef.get
-      if canceled then return ()
-
-      match ← stream.recv with
-      | none =>
-        -- Stream ended
-        let canceled ← canceledRef.get
-        if canceled then return ()
-
-        let finalState ← stateRef.get
-        let finalState := finalState.finish none
-        stateRef.set finalState
-        framedUpdateState finalState
-        framedFireCompleted finalState
-
-      | some chunk =>
-        let canceled ← canceledRef.get
-        if canceled then return ()
-
-        -- Merge chunk into state
-        let state ← stateRef.get
-        let state' := state.mergeChunk chunk
-        stateRef.set state'
-
-        -- Update all dynamics and fire chunk event
-        framedUpdateContent state'.content
-        framedUpdateToolCalls state'.toolCalls
-        framedUpdateState state'
-        framedFireChunk chunk
-
-        -- Check if this was the final chunk
-        if state'.finished then
-          framedFireCompleted state'
-        else
-          loop
-
     -- Run the loop with error handling
     try
-      loop
+      pumpStream stream canceledRef stateRef framedUpdateContent framedUpdateToolCalls
+        framedUpdateState framedFireChunk framedFireCompleted
     catch e =>
       let canceled ← canceledRef.get
       if !canceled then
-        let errMsg := toString e
+        let err := OracleError.networkError (toString e)
         let state ← stateRef.get
-        framedUpdateState (state.finish (some s!"error: {errMsg}"))
-        framedFireErrored errMsg
+        framedUpdateState (state.finish (some (toString err)))
+        framedFireErrored err
 
   pure {
     chunks := chunksEvt

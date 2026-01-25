@@ -5,7 +5,9 @@
   Provides event-driven streaming, throttling, and retry combinators.
 -/
 import Reactive.Host.Spider.Core
+import Reactive.Host.Spider.Event
 import Reactive.Host.Spider.Async
+import Reactive.Core.AsyncState
 import Reactive.Core.Retry
 import Chronos
 import Oracle.Reactive.Types
@@ -13,7 +15,8 @@ import Oracle.Reactive.Client
 
 namespace Oracle.Reactive
 
-open Reactive Reactive.Host
+open Reactive
+open Reactive.Host
 open Oracle
 
 /-- Start a streaming request for each event occurrence.
@@ -31,7 +34,7 @@ def streamOnEvent (client : ReactiveClient) (requests : Evt ChatRequest)
   let framedUpdate := fun v => env.withFrame (updateOutput v)
 
   -- Track current cancel function
-  let currentCancelRef ← IO.mkRef (IO.pure () : IO Unit)
+  let currentCancelRef ← IO.mkRef (pure () : IO Unit)
 
   let unsub ← Reactive.Event.subscribe requests fun req => do
     -- Cancel previous stream
@@ -77,11 +80,53 @@ def streamOnEvent (client : ReactiveClient) (requests : Evt ChatRequest)
 def throttledStreamOnEvent (client : ReactiveClient) (debounceTime : Chronos.Duration)
     (requests : Evt ChatRequest) : SpiderM (Dyn (Option StreamingRequestOutput)) := ⟨fun env => do
   -- Debounce the requests first
-  let debouncedReqs ← Reactive.Host.Event.debounceM debounceTime requests |>.run env
+  let debouncedReqs ← Event.debounceM debounceTime requests |>.run env
 
   -- Then use streamOnEvent on debounced requests
   (streamOnEvent client debouncedReqs).run env
 ⟩
+
+/-- Internal: attempt loop for streamWithRetry -/
+private partial def streamWithRetryLoop
+    (framedUpdate : Reactive.AsyncState (Reactive.RetryState × OracleError) StreamingRequestOutput → IO Unit)
+    (config : Reactive.RetryConfig) (client : ReactiveClient) (req : ChatRequest)
+    (env : SpiderEnv) (canceledRef : IO.Ref Bool) (currentCancelRef : IO.Ref (IO Unit))
+    (retryState : Reactive.RetryState) : IO Unit := do
+  let canceled ← canceledRef.get
+  if canceled then return ()
+
+  -- Start the stream
+  let output ← (client.chatStream req).run env
+
+  -- Check if request state indicates immediate error
+  let initialState ← output.requestState.sample
+  match initialState with
+  | .error err =>
+    -- Check if retryable
+    if err.isRetryable && retryState.canRetry config then
+      let now ← IO.monoMsNow
+      let newState := retryState.recordRetryFailure now (toString err)
+      let delayMs := retryState.backoffDelayMs config
+      IO.sleep (UInt32.ofNat delayMs)
+      streamWithRetryLoop framedUpdate config client req env canceledRef currentCancelRef newState
+    else
+      let now ← IO.monoMsNow
+      let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
+      framedUpdate (Reactive.AsyncState.error (finalState, err))
+
+  | _ =>
+    -- Request started (loading or streaming), success
+    currentCancelRef.set output.cancel
+    framedUpdate (Reactive.AsyncState.ready output)
+
+    -- Subscribe to errors for post-connection failures
+    let unsub ← Reactive.Event.subscribe output.errored fun err => do
+      -- Post-connection errors don't retry
+      let now ← IO.monoMsNow
+      let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
+      framedUpdate (Reactive.AsyncState.error (finalState, err))
+
+    env.currentScope.register unsub
 
 /-- Execute a streaming request with retry on failure.
 
@@ -93,99 +138,67 @@ def throttledStreamOnEvent (client : ReactiveClient) (debounceTime : Chronos.Dur
     @param req The ChatRequest to send
 
     Returns a Dynamic that tracks the overall state including retry attempts. -/
-def streamWithRetry (config : RetryConfig) (client : ReactiveClient) (req : ChatRequest)
-    : SpiderM (Dyn (AsyncState (RetryState × OracleError) StreamingRequestOutput)) := ⟨fun env => do
-  let (stateDyn, updateState) ← createDynamic env.timelineCtx (AsyncState.loading : AsyncState (RetryState × OracleError) StreamingRequestOutput)
+def streamWithRetry (config : Reactive.RetryConfig) (client : ReactiveClient) (req : ChatRequest)
+    : SpiderM (Dyn (Reactive.AsyncState (Reactive.RetryState × OracleError) StreamingRequestOutput)) := ⟨fun env => do
+  let (stateDyn, updateState) ← createDynamic env.timelineCtx (Reactive.AsyncState.loading : Reactive.AsyncState (Reactive.RetryState × OracleError) StreamingRequestOutput)
   let framedUpdate := fun v => env.withFrame (updateState v)
 
   -- Cancellation
   let canceledRef ← IO.mkRef false
-  let currentCancelRef ← IO.mkRef (IO.pure () : IO Unit)
+  let currentCancelRef ← IO.mkRef (pure () : IO Unit)
 
   let _ ← IO.asTask (prio := .dedicated) do
-    let rec attemptLoop (retryState : RetryState) : IO Unit := do
-      let canceled ← canceledRef.get
-      if canceled then return ()
-
-      -- Start the stream
-      let output ← (client.chatStream req).run env
-
-      -- Check if request state indicates immediate error
-      let initialState ← output.requestState.sample
-      match initialState with
-      | .error err =>
-        -- Check if retryable
-        if err.isRetryable && retryState.canRetry config then
-          let now ← IO.monoMsNow
-          let newState := retryState.recordRetryFailure now (toString err)
-          let delayMs := retryState.backoffDelayMs config
-          IO.sleep (UInt32.ofNat delayMs)
-          attemptLoop newState
-        else
-          let now ← IO.monoMsNow
-          let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
-          framedUpdate (AsyncState.error (finalState, err))
-
-      | _ =>
-        -- Request started (loading or streaming), success
-        currentCancelRef.set output.cancel
-        framedUpdate (AsyncState.ready output)
-
-        -- Subscribe to errors for post-connection failures
-        let unsub ← Reactive.Event.subscribe output.errored fun err => do
-          -- Post-connection errors don't retry
-          let now ← IO.monoMsNow
-          let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
-          framedUpdate (AsyncState.error (finalState, err))
-
-        env.currentScope.register unsub
-
-    attemptLoop RetryState.initial
+    streamWithRetryLoop framedUpdate config client req env canceledRef currentCancelRef Reactive.RetryState.initial
 
   pure stateDyn
 ⟩
+
+/-- Internal: attempt loop for chatOnEventWithRetry -/
+private partial def chatOnEventWithRetryLoop
+    (framedUpdate : Reactive.AsyncState (Reactive.RetryState × OracleError) ChatResponse → IO Unit)
+    (config : Reactive.RetryConfig) (client : Client) (req : ChatRequest)
+    (generationRef : IO.Ref Nat) (generation : Nat)
+    (retryState : Reactive.RetryState) : IO Unit := do
+  let currentGen ← generationRef.get
+  if currentGen != generation then return ()
+
+  match ← client.chat req with
+  | .ok response =>
+    let currentGen ← generationRef.get
+    if currentGen == generation then
+      framedUpdate (Reactive.AsyncState.ready response)
+
+  | .error err =>
+    let currentGen ← generationRef.get
+    if currentGen != generation then return ()
+
+    if err.isRetryable && retryState.canRetry config then
+      let now ← IO.monoMsNow
+      let newState := retryState.recordRetryFailure now (toString err)
+      let delayMs := retryState.backoffDelayMs config
+      IO.sleep (UInt32.ofNat delayMs)
+      chatOnEventWithRetryLoop framedUpdate config client req generationRef generation newState
+    else
+      let now ← IO.monoMsNow
+      let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
+      framedUpdate (Reactive.AsyncState.error (finalState, err))
 
 /-- Execute a non-streaming request for each event with retry logic.
 
     Similar to asyncOnEventWithRetry from Reactive.Host.Spider.Async,
     but specialized for Oracle requests. -/
-def chatOnEventWithRetry (config : RetryConfig) (client : ReactiveClient)
-    (requests : Evt ChatRequest) : SpiderM (Dyn (AsyncState (RetryState × OracleError) ChatResponse)) := ⟨fun env => do
+def chatOnEventWithRetry (config : Reactive.RetryConfig) (client : ReactiveClient)
+    (requests : Evt ChatRequest) : SpiderM (Dyn (Reactive.AsyncState (Reactive.RetryState × OracleError) ChatResponse)) := ⟨fun env => do
   let generationRef ← IO.mkRef (0 : Nat)
-  let (stateDyn, updateState) ← createDynamic env.timelineCtx (AsyncState.pending : AsyncState (RetryState × OracleError) ChatResponse)
+  let (stateDyn, updateState) ← createDynamic env.timelineCtx (Reactive.AsyncState.pending : Reactive.AsyncState (Reactive.RetryState × OracleError) ChatResponse)
   let framedUpdate := fun v => env.withFrame (updateState v)
 
   let unsub ← Reactive.Event.subscribe requests fun req => do
     let generation ← generationRef.modifyGet fun g => (g + 1, g + 1)
-    updateState AsyncState.loading
+    updateState Reactive.AsyncState.loading
 
     let _ ← IO.asTask (prio := .dedicated) do
-      let rec attemptLoop (retryState : RetryState) : IO Unit := do
-        let currentGen ← generationRef.get
-        if currentGen != generation then return ()
-
-        match ← client.client.chat req with
-        | .ok response =>
-          let currentGen ← generationRef.get
-          if currentGen == generation then
-            framedUpdate (AsyncState.ready response)
-
-        | .error err =>
-          let currentGen ← generationRef.get
-          if currentGen != generation then return ()
-
-          if err.isRetryable && retryState.canRetry config then
-            let now ← IO.monoMsNow
-            let newState := retryState.recordRetryFailure now (toString err)
-            let delayMs := retryState.backoffDelayMs config
-            IO.sleep (UInt32.ofNat delayMs)
-            attemptLoop newState
-          else
-            let now ← IO.monoMsNow
-            let finalState := { retryState with lastAttemptTime := now, lastError := some (toString err) }
-            framedUpdate (AsyncState.error (finalState, err))
-
-      attemptLoop RetryState.initial
+      chatOnEventWithRetryLoop framedUpdate config client.client req generationRef generation Reactive.RetryState.initial
 
   env.currentScope.register unsub
   pure stateDyn
@@ -225,11 +238,11 @@ def promptOnEvent (client : ReactiveClient) (prompts : Evt String) (systemPrompt
   let framedFireCompleted := fun v => env.withFrame (fireCompleted v)
 
   -- Subscribe to stream changes
-  let streamUnsub ← Reactive.Dynamic.subscribe streamDyn fun streamOpt => do
+  let streamUnsub ← Reactive.Event.subscribe streamDyn.updated fun streamOpt => do
     match streamOpt with
     | some stream =>
       -- Subscribe to content updates
-      let unsub ← Reactive.Dynamic.subscribe stream.content fun content =>
+      let unsub ← Reactive.Event.subscribe stream.content.updated fun content =>
         framedUpdateContent content
       env.currentScope.register unsub
 

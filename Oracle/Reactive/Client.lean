@@ -51,6 +51,51 @@ structure ReactiveClient where
 
 namespace ReactiveClient
 
+/-- Pump a streaming chat response into reactive updates (non-terminating). -/
+private partial def pumpClientStream (chatStream : ChatStream) (canceledRef : IO.Ref Bool)
+    (stateRef : IO.Ref StreamState)
+    (framedUpdateContent : String → IO Unit)
+    (framedUpdateToolCalls : Array ToolCallAccumulator → IO Unit)
+    (framedUpdateStreamState : StreamState → IO Unit)
+    (framedFireChunk : StreamChunk → IO Unit)
+    (framedFireCompleted : StreamState → IO Unit)
+    (framedUpdateRequest : RequestState OracleError StreamOutput → IO Unit)
+    (streamOutput : StreamOutput) : IO Unit := do
+  let canceled ← canceledRef.get
+  if canceled then return ()
+
+  match ← chatStream.recv with
+  | none =>
+    let canceled ← canceledRef.get
+    if canceled then return ()
+
+    let finalState ← stateRef.get
+    let finalState := finalState.finish none
+    stateRef.set finalState
+    framedUpdateStreamState finalState
+    framedFireCompleted finalState
+    framedUpdateRequest (.ready streamOutput)
+
+  | some chunk =>
+    let canceled ← canceledRef.get
+    if canceled then return ()
+
+    let state ← stateRef.get
+    let state' := state.mergeChunk chunk
+    stateRef.set state'
+
+    framedUpdateContent state'.content
+    framedUpdateToolCalls state'.toolCalls
+    framedUpdateStreamState state'
+    framedFireChunk chunk
+
+    if state'.finished then
+      framedFireCompleted state'
+      framedUpdateRequest (.ready streamOutput)
+    else
+      pumpClientStream chatStream canceledRef stateRef framedUpdateContent framedUpdateToolCalls
+        framedUpdateStreamState framedFireChunk framedFireCompleted framedUpdateRequest streamOutput
+
 /-- Create a new ReactiveClient from an Oracle Client -/
 def new (client : Client) : ReactiveClient :=
   { client }
@@ -121,7 +166,7 @@ def chatStream (rc : ReactiveClient) (req : ChatRequest) : SpiderM StreamingRequ
   let framedUpdateRequest := fun v => env.withFrame (updateRequestState v)
 
   -- Create error event
-  let (erroredEvt, fireErrored) ← Reactive.Event.newTrigger env.timelineCtx
+  let (erroredEvt, fireErrored) ← Reactive.Event.newTrigger (a := OracleError) env.timelineCtx
   let framedFireErrored := fun v => env.withFrame (fireErrored v)
 
   -- Create placeholder dynamics that get switched when stream starts
@@ -139,7 +184,15 @@ def chatStream (rc : ReactiveClient) (req : ChatRequest) : SpiderM StreamingRequ
 
   -- Cancellation state
   let canceledRef ← IO.mkRef false
-  let streamOutputRef ← IO.mkRef (none : Option StreamOutput)
+  let streamOutput : StreamOutput := {
+    chunks := chunksEvt
+    content := contentDyn
+    toolCalls := toolCallsDyn
+    state := streamStateDyn
+    completed := completedEvt
+    errored := erroredEvt
+    cancel := canceledRef.set true
+  }
 
   -- Spawn background task for initial request
   let _ ← IO.asTask (prio := .dedicated) do
@@ -153,66 +206,10 @@ def chatStream (rc : ReactiveClient) (req : ChatRequest) : SpiderM StreamingRequ
 
       -- Pump the stream manually (not using streamToEvents since we already have the dynamics)
       let stateRef ← IO.mkRef StreamState.empty
-      let rec loop : IO Unit := do
-        let canceled ← canceledRef.get
-        if canceled then return ()
-
-        match ← chatStream.recv with
-        | none =>
-          -- Stream ended
-          let canceled ← canceledRef.get
-          if canceled then return ()
-          let finalState ← stateRef.get
-          let finalState := finalState.finish none
-          stateRef.set finalState
-          framedUpdateStreamState finalState
-          framedFireCompleted finalState
-          -- Create a minimal StreamOutput for the ready state
-          let dummyOutput : StreamOutput := {
-            chunks := chunksEvt
-            content := contentDyn
-            toolCalls := toolCallsDyn
-            state := streamStateDyn
-            completed := completedEvt
-            errored := erroredEvt
-            cancel := canceledRef.set true
-          }
-          framedUpdateRequest (.ready dummyOutput)
-
-        | some chunk =>
-          let canceled ← canceledRef.get
-          if canceled then return ()
-
-          -- Merge chunk into state
-          let state ← stateRef.get
-          let state' := state.mergeChunk chunk
-          stateRef.set state'
-
-          -- Update all dynamics and fire chunk event
-          framedUpdateContent state'.content
-          framedUpdateToolCalls state'.toolCalls
-          framedUpdateStreamState state'
-          framedFireChunk chunk
-
-          -- Check if this was the final chunk
-          if state'.finished then
-            framedFireCompleted state'
-            let dummyOutput : StreamOutput := {
-              chunks := chunksEvt
-              content := contentDyn
-              toolCalls := toolCallsDyn
-              state := streamStateDyn
-              completed := completedEvt
-              errored := erroredEvt
-              cancel := canceledRef.set true
-            }
-            framedUpdateRequest (.ready dummyOutput)
-          else
-            loop
-
       -- Run with error handling
       try
-        loop
+        pumpClientStream chatStream canceledRef stateRef framedUpdateContent framedUpdateToolCalls
+          framedUpdateStreamState framedFireChunk framedFireCompleted framedUpdateRequest streamOutput
       catch e =>
         let canceled ← canceledRef.get
         if !canceled then

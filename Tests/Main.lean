@@ -18,6 +18,8 @@ import Tests.DeltaTests
 import Tests.ChatResponseTests
 import Tests.ReactiveTypesTests
 import Tests.ChatStreamTests
+import Tests.ReactiveIntegrationTests
+import Tests.OpenRouterIntegrationTests
 import Tests.AgentTests
 import Tests.AgentTypesTests
 import Tests.MockClientTests
