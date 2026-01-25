@@ -226,4 +226,57 @@ test "empty tool calls array treated as completion" := do
   shouldBe result.finalContent (some "Here's my answer.")
   shouldSatisfy result.isSuccess "should complete successfully"
 
+test "AgentConfig request options are applied" := do
+  let reqRef ← IO.mkRef (none : Option ChatRequest)
+  let chat : ChatFunction := fun req => do
+    reqRef.set (some req)
+    return .ok (mockResponseWithContent "resp_1" "ok")
+
+  let tool := ToolHandler.simple "noop" fun _ => return .ok "done"
+  let registry := ToolRegistry.empty.register tool
+  let opts : AgentRequestOptions := {
+    temperature := some 0.2
+    topP := some 0.9
+    stop := some #["END"]
+    toolChoice := some .required
+    parallelToolCalls := some true
+  }
+  let config : AgentConfig := { registry, requestOptions := opts }
+
+  let _ ← runAgentLoop chat config #[Message.user "Hello"] 0
+
+  match ← reqRef.get with
+  | some req =>
+    shouldBe req.temperature (some 0.2)
+    shouldBe req.topP (some 0.9)
+    shouldBe req.stop (some #["END"])
+    shouldBe req.toolChoice (some .required)
+    shouldBe req.parallelToolCalls (some true)
+    shouldSatisfy req.tools.isSome "tools should be set from registry"
+  | none => throw (IO.userError "Expected request to be captured")
+
+test "stepAgent runs a single iteration" := do
+  let toolCall := mockToolCall "call_1" "tool" "{}"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "Done."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let tool := ToolHandler.simple "tool" fun _ => return .ok "ok"
+  let registry := ToolRegistry.empty.register tool
+  let config : AgentConfig := { registry }
+
+  let state0 : AgentState := .running #[Message.user "Hello"] 0
+  let state1 ← stepAgent mock.call config state0
+  match state1 with
+  | .running msgs iter =>
+    shouldBe iter 1
+    let toolResponses := msgs.filter fun m => m.role == .tool
+    shouldBe toolResponses.size 1
+  | _ => throw (IO.userError "Expected running state after first step")
+
+  let state2 ← stepAgent mock.call config state1
+  match state2 with
+  | .completed _ content => shouldBe content "Done."
+  | _ => throw (IO.userError "Expected completed state after second step")
+
 end Tests.AgentTests

@@ -56,6 +56,39 @@ private def parseToolArgs (argsStr : String) : Json :=
   | .ok json => json
   | .error _ => Json.null
 
+/-- Build a chat request from config and messages. -/
+private def buildRequest (config : AgentConfig) (messages : Array Message) : ChatRequest :=
+  let tools := config.tools
+  let toolChoice :=
+    if tools.isEmpty then
+      none
+    else
+      config.requestOptions.toolChoice.orElse (fun _ => some .auto)
+  {
+    model := config.model
+    messages := messages
+    tools := if tools.isEmpty then none else some tools
+    toolChoice := toolChoice
+    temperature := config.requestOptions.temperature
+    maxTokens := config.requestOptions.maxTokens
+    topP := config.requestOptions.topP
+    stop := config.requestOptions.stop
+    presencePenalty := config.requestOptions.presencePenalty
+    frequencyPenalty := config.requestOptions.frequencyPenalty
+    responseFormat := config.requestOptions.responseFormat
+    seed := config.requestOptions.seed
+    topK := config.requestOptions.topK
+    repetitionPenalty := config.requestOptions.repetitionPenalty
+    minP := config.requestOptions.minP
+    topA := config.requestOptions.topA
+    logitBias := config.requestOptions.logitBias
+    logprobs := config.requestOptions.logprobs
+    topLogprobs := config.requestOptions.topLogprobs
+    parallelToolCalls := config.requestOptions.parallelToolCalls
+    modalities := config.requestOptions.modalities
+    imageConfig := config.requestOptions.imageConfig
+  }
+
 /-- Execute all tool calls and return tool response messages -/
 private def executeToolCalls (registry : ToolRegistry) (calls : Array ToolCall) : IO (Array Message) := do
   let mut results := #[]
@@ -67,6 +100,33 @@ private def executeToolCalls (registry : ToolRegistry) (calls : Array ToolCall) 
       | .error errMsg => s!"Error: {errMsg}"
     results := results.push (Message.toolResponse call.id responseContent)
   return results
+
+/-- Run a single step of the agent loop. -/
+private def runAgentStep (chat : ChatFunction) (config : AgentConfig)
+    (messages : Array Message) (iteration : Nat) : IO AgentState := do
+  if iteration >= config.maxIterations then
+    return .toolLimit messages
+
+  let req := buildRequest config messages
+
+  match ← chat req with
+  | .error e => return .error messages e
+  | .ok resp =>
+    let assistantMsg := resp.message.getD (Message.assistant "")
+    let messages := messages.push assistantMsg
+
+    match resp.toolCalls with
+    | none =>
+      let content := resp.content.getD ""
+      return .completed messages content
+    | some calls =>
+      if calls.isEmpty then
+        let content := resp.content.getD ""
+        return .completed messages content
+      else
+        let toolResponses ← executeToolCalls config.registry calls
+        let messages := messages ++ toolResponses
+        return .running messages (iteration + 1)
 
 /-- Run the agent loop until completion, error, or max iterations
 
@@ -80,66 +140,31 @@ private def executeToolCalls (registry : ToolRegistry) (calls : Array ToolCall) 
 -/
 partial def runAgentLoop (chat : ChatFunction) (config : AgentConfig)
     (messages : Array Message) (iteration : Nat) : IO AgentResult := do
-  -- Check iteration limit
-  if iteration >= config.maxIterations then
+  let state ← runAgentStep chat config messages iteration
+  match state with
+  | .running msgs nextIteration =>
+    runAgentLoop chat config msgs nextIteration
+  | .completed msgs content =>
     return {
-      messages
+      messages := msgs
+      finalContent := some content
+      iterations := iteration + 1
+      state := state
+    }
+  | .toolLimit msgs =>
+    return {
+      messages := msgs
       finalContent := none
       iterations := iteration
-      state := .toolLimit messages
+      state := state
     }
-
-  -- Build the chat request
-  let tools := config.tools
-  let req : ChatRequest := {
-    model := config.model
-    messages := messages
-    tools := if tools.isEmpty then none else some tools
-    toolChoice := if tools.isEmpty then none else some .auto
-  }
-
-  -- Call the chat API
-  match ← chat req with
-  | .error e =>
+  | .error msgs err =>
     return {
-      messages
+      messages := msgs
       finalContent := none
       iterations := iteration
-      state := .error messages e
+      state := .error msgs err
     }
-  | .ok resp =>
-    -- Extract the assistant message
-    let assistantMsg := resp.message.getD (Message.assistant "")
-    let messages := messages.push assistantMsg
-
-    -- Check for tool calls
-    match resp.toolCalls with
-    | none =>
-      -- No tool calls - agent is done
-      let content := resp.content.getD ""
-      return {
-        messages
-        finalContent := some content
-        iterations := iteration + 1
-        state := .completed messages content
-      }
-    | some calls =>
-      if calls.isEmpty then
-        -- Empty tool calls array - agent is done
-        let content := resp.content.getD ""
-        return {
-          messages
-          finalContent := some content
-          iterations := iteration + 1
-          state := .completed messages content
-        }
-      else
-        -- Execute tool calls
-        let toolResponses ← executeToolCalls config.registry calls
-        let messages := messages ++ toolResponses
-
-        -- Continue the loop
-        runAgentLoop chat config messages (iteration + 1)
 
 /-- Run an agent with a user prompt
 
@@ -171,11 +196,7 @@ def runAgent (chat : ChatFunction) (config : AgentConfig) (userPrompt : String) 
 def stepAgent (chat : ChatFunction) (config : AgentConfig) (state : AgentState) : IO AgentState := do
   match state with
   | .running messages iteration =>
-    let result ← runAgentLoop chat config messages iteration
-    -- Return state after just one step
-    -- Note: This actually runs to completion, so for true single-step,
-    -- we'd need a different implementation
-    return result.state
+    runAgentStep chat config messages iteration
   | terminal => return terminal
 
 end Oracle.Agent

@@ -60,6 +60,7 @@ test "AgentConfig default values" := do
   shouldBe config.model "anthropic/claude-sonnet-4"
   shouldBe config.systemPrompt none
   shouldBe config.tools.size 0
+  shouldBe config.requestOptions.toolChoice none
 
 test "AgentConfig.withModel sets model" := do
   let config := AgentConfig.withRegistry ToolRegistry.empty |>.withModel "gpt-4"
@@ -72,6 +73,11 @@ test "AgentConfig.withSystemPrompt sets prompt" := do
 test "AgentConfig.withMaxIterations sets limit" := do
   let config := (default : AgentConfig).withMaxIterations 5
   shouldBe config.maxIterations 5
+
+test "AgentConfig.withRequestOptions sets options" := do
+  let opts : AgentRequestOptions := { temperature := some 0.5 }
+  let config := (default : AgentConfig).withRequestOptions opts
+  shouldBe config.requestOptions.temperature (some 0.5)
 
 test "AgentState predicates" := do
   let running := AgentState.running #[] 0

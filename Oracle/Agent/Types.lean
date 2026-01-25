@@ -7,6 +7,7 @@ import Lean.Data.Json
 import Oracle.Core.Types
 import Oracle.Core.Tool
 import Oracle.Core.Error
+import Oracle.Request.ChatRequest
 
 namespace Oracle.Agent
 
@@ -66,6 +67,29 @@ def execute (reg : ToolRegistry) (name : String) (args : Json) : IO (Except Stri
 
 end ToolRegistry
 
+/-- Optional request settings for agent chat calls. -/
+structure AgentRequestOptions where
+  temperature : Option Float := none
+  maxTokens : Option Nat := none
+  topP : Option Float := none
+  stop : Option (Array String) := none
+  presencePenalty : Option Float := none
+  frequencyPenalty : Option Float := none
+  responseFormat : Option ResponseFormat := none
+  seed : Option Nat := none
+  topK : Option Nat := none
+  repetitionPenalty : Option Float := none
+  minP : Option Float := none
+  topA : Option Float := none
+  logitBias : Option (List (Nat × Float)) := none
+  logprobs : Option Bool := none
+  topLogprobs : Option Nat := none
+  parallelToolCalls : Option Bool := none
+  toolChoice : Option ToolChoice := none
+  modalities : Option (Array Modality) := none
+  imageConfig : Option ImageConfig := none
+  deriving Inhabited
+
 /-- Configuration for the agent loop -/
 structure AgentConfig where
   /-- Maximum number of iterations before stopping -/
@@ -74,6 +98,8 @@ structure AgentConfig where
   model : String := "anthropic/claude-sonnet-4"
   /-- Tool registry with handlers -/
   registry : ToolRegistry := ToolRegistry.empty
+  /-- Optional request settings for agent chat calls -/
+  requestOptions : AgentRequestOptions := {}
   /-- Optional system prompt -/
   systemPrompt : Option String := none
   deriving Inhabited
@@ -99,6 +125,10 @@ def withSystemPrompt (cfg : AgentConfig) (prompt : String) : AgentConfig :=
 /-- Set max iterations -/
 def withMaxIterations (cfg : AgentConfig) (n : Nat) : AgentConfig :=
   { cfg with maxIterations := n }
+
+/-- Set request options -/
+def withRequestOptions (cfg : AgentConfig) (opts : AgentRequestOptions) : AgentConfig :=
+  { cfg with requestOptions := opts }
 
 end AgentConfig
 

@@ -11,6 +11,7 @@ import Oracle.Core.Error
 import Oracle.Core.Types
 import Oracle.Request.ChatRequest
 import Oracle.Response.Delta
+import Oracle.Response.StreamAccumulator
 import Oracle.Client.Sync
 
 namespace Oracle
@@ -106,6 +107,19 @@ partial def collect (s : ChatStream) : IO (Array StreamChunk) := do
     let current ← chunksRef.get
     chunksRef.set (current.push chunk)
   chunksRef.get
+
+/-- Collect full stream state (content and tool calls). -/
+partial def collectState (s : ChatStream) : IO StreamAccumulator := do
+  let stateRef ← IO.mkRef StreamAccumulator.empty
+  s.forEach fun chunk => do
+    let state ← stateRef.get
+    stateRef.set (state.mergeChunk chunk)
+  stateRef.get
+
+/-- Collect all completed tool calls from the stream. -/
+partial def collectToolCalls (s : ChatStream) : IO (Array ToolCall) := do
+  let state ← s.collectState
+  return state.completedToolCalls
 
 /-- Print content to stdout as it arrives (for interactive use).
     Returns (content, chunkCount) for debugging. -/

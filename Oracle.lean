@@ -43,6 +43,7 @@ import Oracle.Request.ChatRequest
 import Oracle.Response.Usage
 import Oracle.Response.ChatResponse
 import Oracle.Response.Delta
+import Oracle.Response.StreamAccumulator
 import Oracle.Response.GenerationStats
 import Oracle.Response.Model
 
