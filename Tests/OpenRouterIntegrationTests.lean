@@ -4,6 +4,7 @@
 
 import Crucible
 import Oracle
+import Oracle.Agent
 import Oracle.Reactive
 import Reactive.Host.Spider.Core
 import Tests.Support
@@ -11,7 +12,9 @@ import Tests.Support
 namespace Tests.OpenRouterIntegrationTests
 
 open Crucible
+open Lean Json
 open Oracle
+open Oracle.Agent
 open Oracle.Reactive
 open Reactive.Host
 
@@ -37,8 +40,8 @@ private def getModel : IO String := do
   match (← IO.getEnv "OPENROUTER_MODEL") with
   | some model =>
     let model := model.trim
-    pure (if model.isEmpty then Models.claudeSonnet else model)
-  | none => pure Models.claudeSonnet
+    pure (if model.isEmpty then Models.geminiFlash else model)
+  | none => pure Models.geminiFlash
 
 private def getBaseUrl : IO String := do
   match (← IO.getEnv "OPENROUTER_BASE_URL") with
@@ -99,5 +102,120 @@ test "reactive promptStream completes" (timeout := 30000) := do
     | some _ =>
       shouldSatisfy (content.toLower.containsSubstr "ok") "should contain ok"
     | none => throw (IO.userError "Expected reactive completion")
+
+test "agent loop with calculator tool" (timeout := 60000) := do
+  match ← getApiKey with
+  | none =>
+    IO.println "Skipping OpenRouter integration (set OPENROUTER_RUN_INTEGRATION=1 and OPENROUTER_API_KEY)."
+    return ()
+  | some key =>
+    let client ← buildClient key
+    let model ← getModel
+
+    -- Define a calculator tool with proper JSON schema
+    let calcParams := Json.mkObj [
+      ("type", "object"),
+      ("properties", Json.mkObj [
+        ("operation", Json.mkObj [
+          ("type", "string"),
+          ("enum", Json.arr #["add", "multiply"]),
+          ("description", "The arithmetic operation to perform")
+        ]),
+        ("a", Json.mkObj [("type", "number"), ("description", "First operand")]),
+        ("b", Json.mkObj [("type", "number"), ("description", "Second operand")])
+      ]),
+      ("required", Json.arr #["operation", "a", "b"])
+    ]
+
+    let calcTool := Tool.create "calculate" (some "Perform arithmetic calculations") (some calcParams)
+    let calcHandler := ToolHandler.create calcTool fun args => do
+      let op := args.getObjValAs? String "operation" |>.toOption |>.getD "add"
+      let a := args.getObjValAs? Float "a" |>.toOption |>.getD 0
+      let b := args.getObjValAs? Float "b" |>.toOption |>.getD 0
+      let result := if op == "multiply" then a * b else a + b
+      pure (.ok s!"{result}")
+
+    let registry := ToolRegistry.empty.register calcHandler
+    let config : AgentConfig := {
+      registry := registry
+      maxIterations := 5
+      model := model
+    }
+
+    let result ← runAgent client.chat config "What is 7 times 8? Use the calculate tool."
+    shouldSatisfy result.isSuccess "agent should complete successfully"
+    shouldSatisfy ((result.finalContent.getD "").containsSubstr "56") "should contain 56"
+
+test "agent multi-turn with lookup tool" (timeout := 60000) := do
+  match ← getApiKey with
+  | none =>
+    IO.println "Skipping OpenRouter integration (set OPENROUTER_RUN_INTEGRATION=1 and OPENROUTER_API_KEY)."
+    return ()
+  | some key =>
+    let client ← buildClient key
+    let model ← getModel
+
+    -- A lookup tool that returns arbitrary data the model couldn't know
+    let lookupParams := Json.mkObj [
+      ("type", "object"),
+      ("properties", Json.mkObj [
+        ("product_code", Json.mkObj [("type", "string"), ("description", "The product code to look up")])
+      ]),
+      ("required", Json.arr #["product_code"])
+    ]
+
+    let lookupTool := Tool.create "lookup_product" (some "Look up product information by code") (some lookupParams)
+    let lookupHandler := ToolHandler.create lookupTool fun args => do
+      let code := args.getObjValAs? String "product_code" |>.toOption |>.getD ""
+      if code.toLower.containsSubstr "zx7" then
+        pure (.ok "Product ZX7-ALPHA: Price $847.23, Color: Vermillion, Stock: 42 units")
+      else
+        pure (.ok "Product not found in database.")
+
+    let registry := ToolRegistry.empty.register lookupHandler
+    let config : AgentConfig := {
+      registry := registry
+      maxIterations := 5
+      model := model
+    }
+
+    let result ← runAgent client.chat config "Look up product code ZX7-ALPHA and tell me its price."
+    shouldSatisfy result.isSuccess "agent should complete successfully"
+    shouldSatisfy ((result.finalContent.getD "").containsSubstr "847") "should contain the price 847"
+
+test "agent respects iteration limit" (timeout := 60000) := do
+  match ← getApiKey with
+  | none =>
+    IO.println "Skipping OpenRouter integration (set OPENROUTER_RUN_INTEGRATION=1 and OPENROUTER_API_KEY)."
+    return ()
+  | some key =>
+    let client ← buildClient key
+    let model ← getModel
+
+    -- Tool that always returns "keep going" to force iteration limit
+    let checkParams := Json.mkObj [
+      ("type", "object"),
+      ("properties", Json.mkObj [
+        ("status_id", Json.mkObj [("type", "string"), ("description", "Status check ID")])
+      ]),
+      ("required", Json.arr #[])
+    ]
+
+    let checkTool := Tool.create "check_status" (some "Check the processing status") (some checkParams)
+    let checkHandler := ToolHandler.create checkTool fun _ => do
+      pure (.ok "Status: still processing, please check again")
+
+    let registry := ToolRegistry.empty.register checkHandler
+    let config : AgentConfig := {
+      registry := registry
+      maxIterations := 3
+      model := model
+      systemPrompt := some "You must use the check_status tool repeatedly until processing is complete. Never give up - always call the tool again."
+    }
+
+    let result ← runAgent client.chat config "Check the status until processing is done."
+    -- Should hit tool limit, not complete successfully
+    shouldBe result.state.isToolLimit true
+    shouldSatisfy (result.iterations ≤ 3) "should not exceed max iterations"
 
 end Tests.OpenRouterIntegrationTests

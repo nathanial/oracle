@@ -74,6 +74,8 @@ namespace Models
 /-- Google Gemini 2.5 Flash for image generation (Nano Banana) -/
 def geminiFlashImage : String := "google/gemini-2.5-flash-image"
 
+def geminiFlash : String := "google/gemini-3-flash-preview"
+
 /-- Google Gemini 3 Pro for image generation (Nano Banana Pro) -/
 def geminiProImage : String := "google/gemini-3-pro-image-preview"
 

@@ -28,4 +28,8 @@ import Tests.StreamAccumulatorTests
 
 open Crucible
 
-def main : IO UInt32 := runAllSuites
+def main : IO UInt32 := do
+  let result <- runAllSuites
+  _ <- Wisp.FFI.globalCleanup
+  _ <- Wisp.HTTP.Client.shutdown
+  pure result
