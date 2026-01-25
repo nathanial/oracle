@@ -61,6 +61,7 @@ test "AgentConfig default values" := do
   shouldBe config.systemPrompt none
   shouldBe config.tools.size 0
   shouldBe config.requestOptions.toolChoice none
+  shouldBe (← config.hooks.shouldStop (.running #[] 0)) false
 
 test "AgentConfig.withModel sets model" := do
   let config := AgentConfig.withRegistry ToolRegistry.empty |>.withModel "gpt-4"
@@ -79,9 +80,15 @@ test "AgentConfig.withRequestOptions sets options" := do
   let config := (default : AgentConfig).withRequestOptions opts
   shouldBe config.requestOptions.temperature (some 0.5)
 
+test "AgentConfig.withHooks sets hooks" := do
+  let hooks : AgentHooks := { shouldStop := fun _ => pure true }
+  let config := (default : AgentConfig).withHooks hooks
+  shouldBe (← config.hooks.shouldStop (.running #[] 0)) true
+
 test "AgentState predicates" := do
   let running := AgentState.running #[] 0
   let completed := AgentState.completed #[] "done"
+  let stopped := AgentState.stopped #[]
   let toolLimit := AgentState.toolLimit #[]
   let error := AgentState.error #[] (OracleError.networkError "fail")
 
@@ -90,6 +97,9 @@ test "AgentState predicates" := do
 
   shouldBe completed.isCompleted true
   shouldBe completed.isTerminal true
+
+  shouldBe stopped.isStopped true
+  shouldBe stopped.isTerminal true
 
   shouldBe toolLimit.isToolLimit true
   shouldBe toolLimit.isTerminal true

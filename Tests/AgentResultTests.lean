@@ -46,6 +46,19 @@ test "AgentResult.isError for error state" := do
   shouldBe result.isSuccess false
   shouldBe result.hitToolLimit false
   shouldBe result.isError true
+  shouldBe result.isStopped false
+
+test "AgentResult.isStopped for stopped state" := do
+  let result : AgentResult := {
+    messages := #[]
+    finalContent := none
+    iterations := 0
+    state := .stopped #[]
+  }
+  shouldBe result.isSuccess false
+  shouldBe result.hitToolLimit false
+  shouldBe result.isError false
+  shouldBe result.isStopped true
 
 test "AgentResult.error? returns error" := do
   let err := OracleError.rateLimitError (some 30)

@@ -41,6 +41,10 @@ def hitToolLimit (r : AgentResult) : Bool :=
 def isError (r : AgentResult) : Bool :=
   r.state.isError
 
+/-- Check if the agent was stopped by a hook or external condition -/
+def isStopped (r : AgentResult) : Bool :=
+  r.state.isStopped
+
 /-- Get the error if present -/
 def error? (r : AgentResult) : Option OracleError :=
   r.state.error?
@@ -101,32 +105,57 @@ private def executeToolCalls (registry : ToolRegistry) (calls : Array ToolCall) 
     results := results.push (Message.toolResponse call.id responseContent)
   return results
 
+/-- Result of a single agent step. -/
+private structure StepResult where
+  state : AgentState
+  iterationsDelta : Nat := 0
+
+/-- Emit a state update to hooks and return it. -/
+private def emitState (config : AgentConfig) (state : AgentState) : IO AgentState := do
+  config.hooks.onState state
+  return state
+
 /-- Run a single step of the agent loop. -/
 private def runAgentStep (chat : ChatFunction) (config : AgentConfig)
-    (messages : Array Message) (iteration : Nat) : IO AgentState := do
+    (messages : Array Message) (iteration : Nat) : IO StepResult := do
+  let runningState : AgentState := .running messages iteration
+  if ← config.hooks.shouldStop runningState then
+    let state ← emitState config (.stopped messages)
+    return { state := state }
+
   if iteration >= config.maxIterations then
-    return .toolLimit messages
+    let state ← emitState config (.toolLimit messages)
+    return { state := state }
 
   let req := buildRequest config messages
 
   match ← chat req with
-  | .error e => return .error messages e
+  | .error e =>
+    let state ← emitState config (.error messages e)
+    return { state := state }
   | .ok resp =>
     let assistantMsg := resp.message.getD (Message.assistant "")
     let messages := messages.push assistantMsg
+    let runningState : AgentState := .running messages iteration
+    if ← config.hooks.shouldStop runningState then
+      let state ← emitState config (.stopped messages)
+      return { state := state, iterationsDelta := 1 }
 
     match resp.toolCalls with
     | none =>
       let content := resp.content.getD ""
-      return .completed messages content
+      let state ← emitState config (.completed messages content)
+      return { state := state, iterationsDelta := 1 }
     | some calls =>
       if calls.isEmpty then
         let content := resp.content.getD ""
-        return .completed messages content
+        let state ← emitState config (.completed messages content)
+        return { state := state, iterationsDelta := 1 }
       else
         let toolResponses ← executeToolCalls config.registry calls
         let messages := messages ++ toolResponses
-        return .running messages (iteration + 1)
+        let state ← emitState config (.running messages (iteration + 1))
+        return { state := state, iterationsDelta := 1 }
 
 /-- Run the agent loop until completion, error, or max iterations
 
@@ -140,29 +169,37 @@ private def runAgentStep (chat : ChatFunction) (config : AgentConfig)
 -/
 partial def runAgentLoop (chat : ChatFunction) (config : AgentConfig)
     (messages : Array Message) (iteration : Nat) : IO AgentResult := do
-  let state ← runAgentStep chat config messages iteration
-  match state with
+  let step ← runAgentStep chat config messages iteration
+  let totalIterations := iteration + step.iterationsDelta
+  match step.state with
   | .running msgs nextIteration =>
     runAgentLoop chat config msgs nextIteration
   | .completed msgs content =>
     return {
       messages := msgs
       finalContent := some content
-      iterations := iteration + 1
-      state := state
+      iterations := totalIterations
+      state := step.state
+    }
+  | .stopped msgs =>
+    return {
+      messages := msgs
+      finalContent := none
+      iterations := totalIterations
+      state := step.state
     }
   | .toolLimit msgs =>
     return {
       messages := msgs
       finalContent := none
-      iterations := iteration
-      state := state
+      iterations := totalIterations
+      state := step.state
     }
   | .error msgs err =>
     return {
       messages := msgs
       finalContent := none
-      iterations := iteration
+      iterations := totalIterations
       state := .error msgs err
     }
 
@@ -196,7 +233,7 @@ def runAgent (chat : ChatFunction) (config : AgentConfig) (userPrompt : String) 
 def stepAgent (chat : ChatFunction) (config : AgentConfig) (state : AgentState) : IO AgentState := do
   match state with
   | .running messages iteration =>
-    runAgentStep chat config messages iteration
+    return (← runAgentStep chat config messages iteration).state
   | terminal => return terminal
 
 end Oracle.Agent

@@ -279,4 +279,47 @@ test "stepAgent runs a single iteration" := do
   | .completed _ content => shouldBe content "Done."
   | _ => throw (IO.userError "Expected completed state after second step")
 
+test "hooks can stop before calling chat" := do
+  let callCount ← IO.mkRef 0
+  let chat : ChatFunction := fun _ => do
+    callCount.modify (· + 1)
+    return .ok (mockResponseWithContent "resp" "ok")
+
+  let hooks : AgentHooks := { shouldStop := fun _ => pure true }
+  let config : AgentConfig := { hooks := hooks }
+
+  let result ← runAgentLoop chat config #[Message.user "Hello"] 0
+  shouldSatisfy result.isStopped "should stop early"
+  shouldBe (← callCount.get) 0
+
+test "hooks can stop after receiving tool calls" := do
+  let toolCall := mockToolCall "call_1" "tool" "{}"
+  let resp := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let mock ← MockChat.new #[resp]
+
+  let hooks : AgentHooks := {
+    shouldStop := fun state => do
+      let last := state.messages.back?
+      return last.bind (·.toolCalls) |>.isSome
+  }
+
+  let tool := ToolHandler.simple "tool" fun _ => return .ok "ok"
+  let registry := ToolRegistry.empty.register tool
+  let config : AgentConfig := { registry, hooks }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Hello"] 0
+  shouldSatisfy result.isStopped "should stop after tool call"
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 0
+
+test "onState hook receives updates" := do
+  let countRef ← IO.mkRef 0
+  let hooks : AgentHooks := { onState := fun _ => countRef.modify (· + 1) }
+  let resp := mockResponseWithContent "resp_1" "Hello!"
+  let mock ← MockChat.new #[resp]
+  let config : AgentConfig := { hooks }
+
+  let _ ← runAgentLoop mock.call config #[Message.user "Hello"] 0
+  shouldBe (← countRef.get) 1
+
 end Tests.AgentTests
