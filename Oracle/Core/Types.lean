@@ -144,6 +144,32 @@ def userWithImages (text : String) (images : Array ImageSource) (detail : String
   content := .parts (#[.text text] ++ images.map fun src => .image src detail)
 }
 
+/-- Format a message for debugging output -/
+def format (msg : Message) (indent : String := "") : String :=
+  let roleLabel := msg.role.toString.toUpper
+  let content := msg.content.asString
+  let header := s!"{indent}[{roleLabel}]"
+  let lines := if content.isEmpty then #[header] else #[s!"{header} {content}"]
+  let toolCallLines := match msg.toolCalls with
+    | none => #[]
+    | some calls => calls.map fun call =>
+        s!"{indent}  → {call.function.name}({call.function.arguments})"
+  String.intercalate "\n" (lines ++ toolCallLines).toList
+
+/-- Format an array of messages as a conversation -/
+def formatConversation (msgs : Array Message) (indent : String := "") : String :=
+  let separator := s!"{indent}{'─'.toString.pushn '─' 40}"
+  let formatted := msgs.map (format · indent)
+  String.intercalate s!"\n{separator}\n" formatted.toList
+
+/-- Print a message to stdout -/
+def print (msg : Message) : IO Unit :=
+  IO.println (format msg)
+
+/-- Print an array of messages as a conversation -/
+def printConversation (msgs : Array Message) : IO Unit :=
+  IO.println (formatConversation msgs)
+
 end Message
 
 end Oracle

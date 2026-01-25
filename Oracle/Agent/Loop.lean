@@ -49,6 +49,22 @@ def isStopped (r : AgentResult) : Bool :=
 def error? (r : AgentResult) : Option OracleError :=
   r.state.error?
 
+/-- Format the conversation history for debugging -/
+def formatConversation (r : AgentResult) (indent : String := "") : String :=
+  let stateStr := match r.state with
+    | .running _ iter => s!"running (iteration {iter})"
+    | .completed _ _ => "completed"
+    | .stopped _ => "stopped"
+    | .toolLimit _ => "tool limit reached"
+    | .error _ e => s!"error: {repr e}"
+  let header := s!"{indent}=== Agent Result: {stateStr}, {r.iterations} iterations ==="
+  let conversation := Message.formatConversation r.messages indent
+  s!"{header}\n{conversation}"
+
+/-- Print the conversation history to stdout -/
+def printConversation (r : AgentResult) : IO Unit :=
+  IO.println (formatConversation r)
+
 end AgentResult
 
 /-- Type alias for a chat function (abstracts over real client or mock) -/

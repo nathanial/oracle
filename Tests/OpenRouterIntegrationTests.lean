@@ -180,6 +180,7 @@ test "agent multi-turn with lookup tool" (timeout := 60000) := do
     }
 
     let result ← runAgent client.chat config "Look up product code ZX7-ALPHA and tell me its price."
+    AgentResult.printConversation result
     shouldSatisfy result.isSuccess "agent should complete successfully"
     shouldSatisfy ((result.finalContent.getD "").containsSubstr "847") "should contain the price 847"
 
