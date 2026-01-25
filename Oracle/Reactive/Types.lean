@@ -13,6 +13,13 @@ namespace Oracle.Reactive
 
 open Reactive.Host
 
+/-- Build an array with `n` copies of a value. -/
+private def mkArray {α : Type} (n : Nat) (value : α) : Array α :=
+  let rec loop : Nat → Array α → Array α
+    | 0, acc => acc
+    | n + 1, acc => loop n (acc.push value)
+  loop n #[]
+
 /-- State of an API request.
     Unlike AsyncState, this has an explicit `streaming` state for SSE responses. -/
 inductive RequestState (e a : Type) where
@@ -98,36 +105,6 @@ def getOrElse (default : a) : RequestState e a → a
 
 end RequestState
 
-/-- State accumulated during streaming.
-    Updated incrementally as chunks arrive. -/
-structure StreamState where
-  /-- Accumulated content so far -/
-  content : String := ""
-  /-- Number of chunks received -/
-  chunkCount : Nat := 0
-  /-- Accumulated tool calls (indexed by position) -/
-  toolCalls : Array ToolCallAccumulator := #[]
-  /-- Whether the stream has finished -/
-  finished : Bool := false
-  /-- Finish reason if available -/
-  finishReason : Option String := none
-  deriving Repr, Inhabited
-
-namespace StreamState
-
-/-- Create an empty stream state -/
-def empty : StreamState := {}
-
-/-- Append content to the stream state -/
-def appendContent (s : StreamState) (content : String) : StreamState :=
-  { s with content := s.content ++ content, chunkCount := s.chunkCount + 1 }
-
-/-- Mark the stream as finished -/
-def finish (s : StreamState) (reason : Option String := none) : StreamState :=
-  { s with finished := true, finishReason := reason }
-
-end StreamState
-
 /-- Accumulates tool call deltas into a complete tool call.
     Tool calls arrive in pieces across multiple streaming chunks. -/
 structure ToolCallAccumulator where
@@ -187,6 +164,36 @@ def isComplete (acc : ToolCallAccumulator) : Bool :=
   acc.id.isSome && acc.functionName.isSome
 
 end ToolCallAccumulator
+
+/-- State accumulated during streaming.
+    Updated incrementally as chunks arrive. -/
+structure StreamState where
+  /-- Accumulated content so far -/
+  content : String := ""
+  /-- Number of chunks received -/
+  chunkCount : Nat := 0
+  /-- Accumulated tool calls (indexed by position) -/
+  toolCalls : Array ToolCallAccumulator := #[]
+  /-- Whether the stream has finished -/
+  finished : Bool := false
+  /-- Finish reason if available -/
+  finishReason : Option String := none
+  deriving Repr, Inhabited
+
+namespace StreamState
+
+/-- Create an empty stream state -/
+def empty : StreamState := {}
+
+/-- Append content to the stream state -/
+def appendContent (s : StreamState) (content : String) : StreamState :=
+  { s with content := s.content ++ content, chunkCount := s.chunkCount + 1 }
+
+/-- Mark the stream as finished -/
+def finish (s : StreamState) (reason : Option String := none) : StreamState :=
+  { s with finished := true, finishReason := reason }
+
+end StreamState
 
 /-- Manages conversation history with observable state. -/
 structure Conversation where
@@ -261,7 +268,7 @@ def StreamState.mergeChunk (state : StreamState) (chunk : StreamChunk) : StreamS
           -- Ensure we have an accumulator for this index
           let toolCalls := if delta.index < st.toolCalls.size
             then st.toolCalls
-            else st.toolCalls ++ (Array.mkArray (delta.index + 1 - st.toolCalls.size) (ToolCallAccumulator.new delta.index))
+            else st.toolCalls ++ (mkArray (delta.index + 1 - st.toolCalls.size) (ToolCallAccumulator.new delta.index))
 
           -- Update the accumulator at the index
           let acc := toolCalls[delta.index]!

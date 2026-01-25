@@ -14,6 +14,10 @@ import Tests.RetryTests
 import Tests.NewParamsTests
 import Tests.EndpointTests
 import Tests.VisionTests
+import Tests.DeltaTests
+import Tests.ChatResponseTests
+import Tests.ReactiveTypesTests
+import Tests.ChatStreamTests
 import Tests.AgentTests
 import Tests.AgentTypesTests
 import Tests.MockClientTests

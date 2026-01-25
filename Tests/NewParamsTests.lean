@@ -33,6 +33,67 @@ test "ChatRequest.withParallelToolCalls enables parallel" := do
   let req := ChatRequest.simple "gpt-4" "Hi" |>.withParallelToolCalls
   shouldBe req.parallelToolCalls (some true)
 
+test "ResponseFormat.jsonSchema toJson includes schema fields" := do
+  let schema := Lean.Json.mkObj [
+    ("type", Lean.Json.str "object")
+  ]
+  let format := ResponseFormat.jsonSchema schema "result" false
+  let json := Lean.toJson format
+  match json.getObjValAs? String "type" with
+  | .ok t => shouldBe t "json_schema"
+  | .error _ => throw (IO.userError "Missing type")
+  match json.getObjVal? "json_schema" with
+  | .ok schemaObj =>
+    match schemaObj.getObjValAs? String "name" with
+    | .ok name => shouldBe name "result"
+    | .error _ => throw (IO.userError "Missing name")
+    match schemaObj.getObjValAs? Bool "strict" with
+    | .ok strict => shouldBe strict false
+    | .error _ => throw (IO.userError "Missing strict")
+  | .error _ => throw (IO.userError "Missing json_schema")
+
+test "ChatRequest toJson includes response_format" := do
+  let schema := Lean.Json.mkObj [("type", Lean.Json.str "object")]
+  let req := { (ChatRequest.simple "gpt-4" "Hi") with
+    responseFormat := some (ResponseFormat.jsonSchema schema) }
+  let json := Lean.toJson req
+  match json.getObjVal? "response_format" with
+  | .ok _ => pure ()
+  | .error _ => throw (IO.userError "Missing response_format")
+
+test "ChatRequest toJson includes modalities and image_config" := do
+  let req := ChatRequest.simple "gpt-4" "Make an image"
+    |>.withImageGeneration (some "16:9")
+  let json := Lean.toJson req
+  match json.getObjVal? "modalities" with
+  | .ok arr =>
+    match arr.getArr? with
+    | .ok values => shouldBe values.size 2
+    | .error _ => throw (IO.userError "modalities should be array")
+  | .error _ => throw (IO.userError "Missing modalities")
+  match json.getObjVal? "image_config" with
+  | .ok cfg =>
+    match cfg.getObjValAs? String "aspect_ratio" with
+    | .ok ratio => shouldBe ratio "16:9"
+    | .error _ => throw (IO.userError "Missing aspect_ratio")
+  | .error _ => throw (IO.userError "Missing image_config")
+
+test "ChatRequest toJson includes penalties and seed" := do
+  let req := ChatRequest.simple "gpt-4" "Hi"
+    |>.withPresencePenalty 0.3
+    |>.withFrequencyPenalty 0.4
+    |>.withSeed 42
+  let json := Lean.toJson req
+  match json.getObjValAs? Float "presence_penalty" with
+  | .ok v => shouldBe v 0.3
+  | .error _ => throw (IO.userError "Missing presence_penalty")
+  match json.getObjValAs? Float "frequency_penalty" with
+  | .ok v => shouldBe v 0.4
+  | .error _ => throw (IO.userError "Missing frequency_penalty")
+  match json.getObjValAs? Nat "seed" with
+  | .ok v => shouldBe v 42
+  | .error _ => throw (IO.userError "Missing seed")
+
 test "ChatRequest toJson includes new parameters" := do
   let req := ChatRequest.simple "gpt-4" "Hi"
     |>.withTopK 40
