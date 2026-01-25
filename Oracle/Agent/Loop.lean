@@ -54,11 +54,11 @@ end AgentResult
 /-- Type alias for a chat function (abstracts over real client or mock) -/
 def ChatFunction := ChatRequest → IO (OracleResult ChatResponse)
 
-/-- Parse tool arguments from JSON string -/
-private def parseToolArgs (argsStr : String) : Json :=
+/-- Parse tool arguments from JSON string. -/
+private def parseToolArgs (argsStr : String) : Except String Json :=
   match Json.parse argsStr with
-  | .ok json => json
-  | .error _ => Json.null
+  | .ok json => .ok json
+  | .error err => .error err
 
 /-- Build a chat request from config and messages. -/
 private def buildRequest (config : AgentConfig) (messages : Array Message) : ChatRequest :=
@@ -97,11 +97,14 @@ private def buildRequest (config : AgentConfig) (messages : Array Message) : Cha
 private def executeToolCalls (registry : ToolRegistry) (calls : Array ToolCall) : IO (Array Message) := do
   let mut results := #[]
   for call in calls do
-    let args := parseToolArgs call.function.arguments
-    let result ← registry.execute call.function.name args
-    let responseContent := match result with
-      | .ok content => content
-      | .error errMsg => s!"Error: {errMsg}"
+    let responseContent ← match parseToolArgs call.function.arguments with
+      | .ok args =>
+        let result ← registry.execute call.function.name args
+        pure <| match result with
+          | .ok content => content
+          | .error errMsg => s!"Error: {errMsg}"
+      | .error errMsg =>
+        pure s!"Error: Invalid tool arguments for {call.function.name}: {errMsg}"
     results := results.push (Message.toolResponse call.id responseContent)
   return results
 

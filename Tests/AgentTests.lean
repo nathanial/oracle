@@ -75,6 +75,27 @@ test "handles tool execution error gracefully" := do
   shouldBe toolResponses.size 1
   shouldSatisfy (toolResponses[0]!.content.asString.containsSubstr "Error") "tool response should contain error"
 
+test "invalid tool arguments produce error response" := do
+  let toolCall := mockToolCall "call_1" "calculate" "{\"x\":1"
+  let resp1 := mockResponseWithToolCalls "resp_1" #[toolCall]
+  let resp2 := mockResponseWithContent "resp_2" "Handled error."
+  let mock ← MockChat.new #[resp1, resp2]
+
+  let calledRef ← IO.mkRef false
+  let tool := ToolHandler.simple "calculate" fun _ => do
+    calledRef.set true
+    return .ok "ok"
+
+  let registry := ToolRegistry.empty.register tool
+  let config : AgentConfig := { registry }
+
+  let result ← runAgentLoop mock.call config #[Message.user "Compute"] 0
+
+  let toolResponses := result.messages.filter fun m => m.role == .tool
+  shouldBe toolResponses.size 1
+  shouldSatisfy (toolResponses[0]!.content.asString.containsSubstr "Invalid tool arguments") "should mention invalid arguments"
+  shouldBe (← calledRef.get) false
+
 test "multiple tool calls in single response" := do
   let toolCalls := #[
     mockToolCall "call_1" "tool_a" "{}",
